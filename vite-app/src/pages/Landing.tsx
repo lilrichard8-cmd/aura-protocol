@@ -38,15 +38,22 @@ export const Landing: FC = () => {
           永久存储 · 真正所有权 · 公平经济
         </p>
 
-        {/* Enter button */}
-        <button
-          onClick={() => navigate('/explore')}
-          className="group relative px-12 py-6 bg-gradient-aura rounded-full text-white text-2xl font-bold hover:scale-110 transition-all duration-300 shadow-2xl animate-fade-in"
-          style={{ animationDelay: '0.8s' }}
-        >
-          <span className="relative z-10">进入 AURA</span>
-          <div className="absolute inset-0 bg-white/20 rounded-full blur-xl group-hover:blur-2xl transition-all opacity-0 group-hover:opacity-100"></div>
-        </button>
+        {/* Enter buttons */}
+        <div className="flex flex-col sm:flex-row gap-4 justify-center items-center animate-fade-in" style={{ animationDelay: '0.8s' }}>
+          <button
+            onClick={() => navigate('/explore')}
+            className="group relative px-12 py-6 bg-gradient-aura rounded-full text-white text-2xl font-bold hover:scale-110 transition-all duration-300 shadow-2xl"
+          >
+            <span className="relative z-10">进入 AURA</span>
+            <div className="absolute inset-0 bg-white/20 rounded-full blur-xl group-hover:blur-2xl transition-all opacity-0 group-hover:opacity-100"></div>
+          </button>
+          <button
+            onClick={() => navigate('/auth')}
+            className="group relative px-10 py-5 bg-white/10 border border-white/20 rounded-full text-white text-xl font-semibold hover:scale-105 hover:bg-white/20 transition-all duration-300"
+          >
+            ✉️ 邮箱登录
+          </button>
+        </div>
 
         {/* Features */}
         <div className="mt-20 grid grid-cols-1 md:grid-cols-3 gap-8 animate-fade-in" style={{ animationDelay: '1s' }}>

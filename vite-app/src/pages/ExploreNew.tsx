@@ -1,9 +1,8 @@
-import { FC, useState } from 'react'
+import { FC, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SearchFilter } from '../components/SearchFilter'
 import { mockPosts } from '../data/mockPosts'
-
-// 使用导入的100个mock posts
+import { storage } from '../utils/storage'
 /*
 const oldMockPosts = [
   {
@@ -129,7 +128,12 @@ export const ExploreNew: FC = () => {
     { value: 'audio', label: '🎵 音频' },
   ]
 
-  const filteredPosts = mockPosts.filter(post => {
+  const allPosts = useMemo(() => {
+    const userPosts = storage.getPosts()
+    return [...userPosts, ...mockPosts]
+  }, [])
+
+  const filteredPosts = allPosts.filter(post => {
     if (filter === 'all') return true
     return post.type === filter
   })
@@ -204,6 +208,8 @@ export const ExploreNew: FC = () => {
                       <h3 className="text-2xl font-bold text-white mb-3">{String(post.title)}</h3>
                       <p className="text-white/80 text-sm line-clamp-3">{String(post.description)}</p>
                     </div>
+                  ) : (post as any).hasImage && String(post.coverImage).startsWith('data:') ? (
+                    <img src={String(post.coverImage)} alt={String(post.title)} className="w-full h-full object-cover absolute inset-0" />
                   ) : (
                     <div className="text-8xl">{String(post.coverImage)}</div>
                   )}

@@ -4,6 +4,7 @@ import { WalletProvider } from './components/WalletProvider'
 import { ToastProvider } from './components/Toast'
 import { ThemeProvider } from './context/ThemeContext'
 import { AuraProvider } from './contexts/AuraContext'
+import { AuthProvider } from './contexts/AuthContext'
 import { VersionSwitcher } from './components-v2/VersionSwitcher'
 import { LandingV2 } from './pages-v2/LandingV2'
 import { ExploreV2 } from './pages-v2/ExploreV2'
@@ -38,10 +39,11 @@ import { OfferSuccess } from './pages/OfferSuccess'
 import { CreatorCoin } from './pages/CreatorCoin'
 import { CreatorCoinDetail } from './pages/CreatorCoinDetail'
 import { CreateCreatorCoin } from './pages/CreateCreatorCoin'
+import { EmailAuth } from './pages/EmailAuth'
 
 const AppContent: FC = () => {
   const location = useLocation()
-  const isLanding = location.pathname === '/'
+  const isLanding = location.pathname === '/' || location.pathname === '/auth'
   const isProfile = location.pathname === '/profile'
   const isMessages = location.pathname === '/messages'
   const isV2 = location.pathname.startsWith('/v2')
@@ -59,6 +61,7 @@ const AppContent: FC = () => {
         
         {/* V1 Routes */}
         <Route path="/" element={<Landing />} />
+        <Route path="/auth" element={<EmailAuth />} />
         <Route path="/explore" element={<ExploreNew />} />
         <Route path="/create" element={<Create />} />
         <Route path="/market" element={<MarketNew />} />
@@ -111,17 +114,19 @@ const AppContent: FC = () => {
 
 const App: FC = () => {
   return (
-    <WalletProvider>
-      <AuraProvider network="devnet">
-        <ToastProvider>
-          <Router>
-            <ThemeProvider>
-              <AppContent />
-            </ThemeProvider>
-          </Router>
-        </ToastProvider>
-      </AuraProvider>
-    </WalletProvider>
+    <AuthProvider>
+      <WalletProvider>
+        <AuraProvider network="devnet">
+          <ToastProvider>
+            <Router>
+              <ThemeProvider>
+                <AppContent />
+              </ThemeProvider>
+            </Router>
+          </ToastProvider>
+        </AuraProvider>
+      </WalletProvider>
+    </AuthProvider>
   )
 }
 

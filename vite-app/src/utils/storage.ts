@@ -70,6 +70,18 @@ export const storage = {
     localStorage.setItem('drafts', JSON.stringify(filtered))
   },
 
+  // 用户发布的内容
+  getPosts: (): any[] => {
+    const saved = localStorage.getItem('aura_posts')
+    return saved ? JSON.parse(saved) : []
+  },
+
+  savePost: (post: any) => {
+    const posts = storage.getPosts()
+    posts.unshift(post)
+    localStorage.setItem('aura_posts', JSON.stringify(posts))
+  },
+
   // 浏览历史
   addToHistory: (item: any) => {
     const history = storage.getHistory()

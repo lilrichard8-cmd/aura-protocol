@@ -1,6 +1,8 @@
-import { FC, useState } from 'react'
+import { FC, useState, useRef, useMemo } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../contexts/AuthContext'
+import { storage } from '../utils/storage'
 
 const mockUserData = {
   username: 'TestUser',
@@ -59,8 +61,45 @@ const getTierInfo = (tier: string) => {
 
 export const Profile: FC = () => {
   const { connected, publicKey } = useWallet()
+  const { user, isLoggedIn, updateProfile, logout } = useAuth()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'posts' | 'collections' | 'nfts' | 'stats' | 'reputation'>('posts')
+  const [isEditing, setIsEditing] = useState(false)
+  const [editUsername, setEditUsername] = useState('')
+  const [editBio, setEditBio] = useState('')
+  const avatarInput = useRef<HTMLInputElement>(null)
+
+  const userPosts = useMemo(() => {
+    if (!user) return []
+    return storage.getPosts().filter((p: any) => p.authorEmail === user.email)
+  }, [user])
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      updateProfile({ avatar: reader.result as string })
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const startEditing = () => {
+    setEditUsername(user?.username || mockUserData.username)
+    setEditBio(user?.bio || mockUserData.bio)
+    setIsEditing(true)
+  }
+
+  const saveEditing = () => {
+    updateProfile({ username: editUsername, bio: editBio })
+    setIsEditing(false)
+  }
+
+  const displayName = user?.username || mockUserData.username
+  const displayBio = user?.bio || mockUserData.bio
+  const displayAvatar = user?.avatar || mockUserData.avatar
+  const displayFollowers = user?.followers ?? mockUserData.followers
+  const displayFollowing = user?.following ?? mockUserData.following
 
   return (
     <div className="min-h-screen pt-6 pb-32 px-4 bg-black">
@@ -73,32 +112,58 @@ export const Profile: FC = () => {
           {/* Avatar and Info */}
           <div className="bg-white/5 border border-white/10 border-t-0 rounded-b-2xl p-6 -mt-16 relative">
             {/* Avatar */}
-            <div className="w-24 h-24 bg-gradient-aura rounded-full flex items-center justify-center text-5xl mb-4 border-4 border-black relative z-10">
-              {mockUserData.avatar}
+            <input type="file" ref={avatarInput} className="hidden" accept="image/*" onChange={handleAvatarChange} />
+            <div 
+              onClick={() => isLoggedIn && avatarInput.current?.click()}
+              className={`w-24 h-24 bg-gradient-aura rounded-full flex items-center justify-center text-5xl mb-4 border-4 border-black relative z-10 overflow-hidden ${isLoggedIn ? 'cursor-pointer hover:opacity-80' : ''}`}
+            >
+              {displayAvatar.startsWith('data:') ? (
+                <img src={displayAvatar} alt="avatar" className="w-full h-full object-cover" />
+              ) : (
+                displayAvatar
+              )}
             </div>
 
             {/* Name and Bio */}
-            <h1 className="text-2xl font-bold mb-1">{mockUserData.username}</h1>
-            <p className="text-gray-400 text-sm mb-4">{mockUserData.bio}</p>
+            {isEditing ? (
+              <div className="space-y-2 mb-4 w-full">
+                <input
+                  value={editUsername}
+                  onChange={e => setEditUsername(e.target.value)}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-lg font-bold"
+                  placeholder="用户名"
+                />
+                <textarea
+                  value={editBio}
+                  onChange={e => setEditBio(e.target.value)}
+                  rows={2}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-gray-300 text-sm resize-none"
+                  placeholder="个人简介"
+                />
+                <div className="flex gap-2">
+                  <button onClick={saveEditing} className="flex-1 py-2 bg-gradient-aura rounded-lg text-white text-sm font-semibold">保存</button>
+                  <button onClick={() => setIsEditing(false)} className="flex-1 py-2 bg-white/10 rounded-lg text-white text-sm">取消</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <h1 className="text-2xl font-bold mb-1">{displayName}</h1>
+                <p className="text-gray-400 text-sm mb-4">{displayBio || '还没有简介'}</p>
+              </>
+            )}
 
             {/* Stats - Clickable */}
             <div className="flex gap-6 mb-4">
-              <button 
-                onClick={() => navigate('/following')}
-                className="text-left hover:opacity-70 transition-opacity"
-              >
-                <div className="text-xl font-bold">{mockUserData.followers}</div>
+              <button onClick={() => navigate('/following')} className="text-left hover:opacity-70 transition-opacity">
+                <div className="text-xl font-bold">{displayFollowers}</div>
                 <div className="text-xs text-gray-400">粉丝</div>
               </button>
-              <button 
-                onClick={() => navigate('/following')}
-                className="text-left hover:opacity-70 transition-opacity"
-              >
-                <div className="text-xl font-bold">{mockUserData.following}</div>
+              <button onClick={() => navigate('/following')} className="text-left hover:opacity-70 transition-opacity">
+                <div className="text-xl font-bold">{displayFollowing}</div>
                 <div className="text-xs text-gray-400">关注</div>
               </button>
               <div>
-                <div className="text-xl font-bold">{mockUserData.posts}</div>
+                <div className="text-xl font-bold">{userPosts.length || mockUserData.posts}</div>
                 <div className="text-xs text-gray-400">作品</div>
               </div>
               <div>
@@ -110,7 +175,7 @@ export const Profile: FC = () => {
             {/* Action Buttons */}
             <div className="grid grid-cols-3 gap-2">
               <button
-                onClick={() => alert('编辑资料\n\n可以修改：\n• 用户名\n• 头像\n• 简介\n• 社交链接\n\n（测试模式）')}
+                onClick={startEditing}
                 className="py-2 bg-gradient-aura rounded-lg text-white text-sm font-semibold hover:opacity-90 transition-opacity"
               >
                 编辑资料
@@ -121,29 +186,37 @@ export const Profile: FC = () => {
               >
                 💬 消息
               </button>
-              <button
-                onClick={() => alert('分享资料\n\n生成分享链接或二维码\n\n（测试模式）')}
-                className="py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm hover:bg-white/20 transition-colors"
-              >
-                🔗 分享
-              </button>
-            </div>
+              {isLoggedIn ? (
+                <button
+                  onClick={() => { logout(); navigate('/') }}
+                  className="py-2 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-colors"
+                >
+                  退出登录
+                </button>
+              ) : (
+                <button
+                  onClick={() => navigate('/auth')}
+                  className="py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm hover:bg-white/20 transition-colors"
+                >
+                  ✉️ 登录
+                </button>
+              )}
           </div>
         </div>
 
         {/* Wallet Info */}
-        {connected && (
+        {(connected || isLoggedIn) && (
           <div className="bg-gradient-to-r from-aura-purple/20 to-aura-pink/20 border border-white/10 rounded-xl p-4 mb-6">
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-xs text-gray-400 mb-1">钱包地址</div>
+                <div className="text-xs text-gray-400 mb-1">钱包地址{isLoggedIn && !connected ? '（托管）' : ''}</div>
                 <div className="text-sm font-mono">
-                  {publicKey?.toString().slice(0, 8)}...{publicKey?.toString().slice(-8)}
+                  {(publicKey?.toString() || user?.walletAddress || '').slice(0, 8)}...{(publicKey?.toString() || user?.walletAddress || '').slice(-8)}
                 </div>
               </div>
               <button
                 onClick={() => {
-                  navigator.clipboard.writeText(publicKey?.toString() || '')
+                  navigator.clipboard.writeText(publicKey?.toString() || user?.walletAddress || '')
                   alert('✅ 地址已复制')
                 }}
                 className="px-3 py-1 bg-white/10 rounded text-sm hover:bg-white/20 transition-colors"
@@ -264,19 +337,24 @@ export const Profile: FC = () => {
         {/* Content */}
         {activeTab === 'posts' && (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {mockUserPosts.map((post) => (
+            {(userPosts.length > 0 ? userPosts : mockUserPosts).map((post: any) => (
               <div
                 key={post.id}
+                onClick={() => navigate(`/post/${post.id}`, { state: { post } })}
                 className="bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:border-aura-purple/50 transition-all cursor-pointer"
               >
-                <div className="aspect-square bg-gradient-to-br from-aura-purple/20 to-aura-pink/20 flex items-center justify-center text-5xl">
-                  {post.thumbnail}
+                <div className="aspect-square bg-gradient-to-br from-aura-purple/20 to-aura-pink/20 flex items-center justify-center text-5xl overflow-hidden">
+                  {post.coverImage && String(post.coverImage).startsWith('data:') ? (
+                    <img src={post.coverImage} alt={post.title} className="w-full h-full object-cover" />
+                  ) : (
+                    post.thumbnail || post.coverImage || '📝'
+                  )}
                 </div>
                 <div className="p-3">
                   <h4 className="font-semibold text-sm mb-2 line-clamp-1">{post.title}</h4>
                   <div className="flex items-center gap-3 text-xs text-gray-400">
-                    <span>❤️ {post.likes}</span>
-                    <span>👁️ {post.views}</span>
+                    <span>❤️ {post.likes || 0}</span>
+                    <span>👁️ {post.views || 0}</span>
                   </div>
                 </div>
               </div>

@@ -1,11 +1,15 @@
 import { FC, useState, useEffect } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { storage } from '../utils/storage'
+import { useAuth } from '../contexts/AuthContext'
 
 export const Create: FC = () => {
   const { connected, publicKey } = useWallet()
+  const { user } = useAuth()
   const location = useLocation()
+  const navigate = useNavigate()
+  const [tags, setTags] = useState<string[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [contentType, setContentType] = useState('text')
@@ -73,59 +77,54 @@ export const Create: FC = () => {
     }
   }
 
+  const availableTags = ['摄影', '音乐', '艺术', '文学', '技术', '其他']
+
+  const toggleTag = (tag: string) => {
+    setTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     
-    // 测试模式：不需要连接钱包
-    const walletAddress = connected ? publicKey?.toString() : '测试模式（未连接钱包）'
-    
-    // 显示提交的数据
-    const submittedData = {
+    if (!title.trim()) { alert('请输入标题'); return }
+    if (!description.trim()) { alert('请输入描述'); return }
+
+    const authorName = user?.username || (connected ? publicKey?.toString().slice(0, 8) + '.sol' : 'Anonymous')
+    const authorAvatar = user?.avatar || '👤'
+
+    const colors = [
+      'from-purple-500 to-pink-500', 'from-blue-500 to-cyan-500',
+      'from-green-500 to-teal-500', 'from-orange-500 to-red-500',
+      'from-indigo-500 to-purple-500',
+    ]
+    const typeEmojis: Record<string, string> = { text: '📝', image: '🎨', video: '🎬', audio: '🎵', mixed: '✨' }
+
+    const newPost = {
+      id: `user-post-${Date.now()}`,
       title,
+      author: authorName,
+      authorAvatar,
+      authorEmail: user?.email || '',
       description,
-      contentType,
-      accessControl,
-      price: accessControl === 'paid' ? price : '0',
-      file: file ? `${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)` : '无文件',
-      wallet: walletAddress,
-      timestamp: new Date().toLocaleString('zh-CN'),
-      // License data
-      license: {
-        type: licenseType,
-        embedPrice: (licenseType === 'PayToEmbed' || licenseType === 'PayToRemix') ? embedPrice : 'N/A',
-        remixRoyalty: derivativesAllowed ? `${Number(remixRoyaltyBps) / 100}%` : 'N/A',
-        commercialAllowed,
-        derivativesAllowed,
-        attributionRequired,
-      }
+      type: contentType,
+      coverImage: filePreview || typeEmojis[contentType] || '📝',
+      coverColor: colors[Math.floor(Math.random() * colors.length)],
+      price: accessControl === 'paid' ? Number(price) || 0 : 0,
+      isPaid: accessControl === 'paid',
+      isUnlocked: false,
+      likes: 0,
+      views: 0,
+      comments: 0,
+      height: 'medium',
+      onMarket: accessControl === 'paid',
+      createdAt: Date.now(),
+      tags,
+      hasImage: !!filePreview,
     }
-    
-    console.log('📝 提交的内容：', submittedData)
-    
-    // 创建详细的提示信息
-    const message = `✅ 内容发布成功（测试模式）！
 
-📋 发布详情：
-━━━━━━━━━━━━━━━━━━━━━━
-📌 标题：${title}
-📝 描述：${description.substring(0, 50)}${description.length > 50 ? '...' : ''}
-📁 类型：${contentType}
-🔓 访问：${accessControl === 'public' ? '公开' : accessControl === 'paid' ? '付费查看' : '阅后即焚'}
-${accessControl === 'paid' ? `💰 价格：${price} $ORA\n` : ''}${file ? `📎 文件：${file.name}\n` : ''}
-📜 许可：${licenseType}
-${(licenseType === 'PayToEmbed' || licenseType === 'PayToRemix') && embedPrice ? `💸 ${licenseType === 'PayToEmbed' ? '嵌入' : '二创'}价格：${embedPrice} $ORA\n` : ''}${derivativesAllowed ? `🎨 二创分成：${Number(remixRoyaltyBps) / 100}%\n` : ''}👤 钱包：${walletAddress}
-⏰ 时间：${submittedData.timestamp}
-
-${!connected ? '\n💡 提示：这是测试模式，实际发布需要连接钱包' : '\n🎉 已连接钱包，可以进行真实发布'}
-`
-    
-    alert(message)
-    
-    // 清空表单（可选）
-    // setTitle('')
-    // setDescription('')
-    // setFile(null)
-    // setPrice('')
+    storage.savePost(newPost)
+    alert('✅ 发布成功！')
+    navigate('/explore')
   }
 
   return (
@@ -194,6 +193,27 @@ ${!connected ? '\n💡 提示：这是测试模式，实际发布需要连接钱
                 <option value="audio">音频</option>
                 <option value="mixed">混合</option>
               </select>
+            </div>
+
+            {/* Tags */}
+            <div>
+              <label className="block text-sm font-medium mb-2">标签/分类</label>
+              <div className="flex flex-wrap gap-2">
+                {availableTags.map(tag => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    className={`px-4 py-2 rounded-full text-sm transition-all ${
+                      tags.includes(tag)
+                        ? 'bg-gradient-aura text-white'
+                        : 'bg-white/5 border border-white/10 text-gray-400 hover:border-white/30'
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* File Upload */}
