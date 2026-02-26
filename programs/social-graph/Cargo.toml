@@ -1,0 +1,20 @@
+[package]
+name = "aura-social-graph"
+version = "0.1.0"
+description = "AURA Social Graph Program - Open social graph protocol with user-owned NFTs"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "aura_social_graph"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.29.0"
+anchor-spl = "0.29.0"

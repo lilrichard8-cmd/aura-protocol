@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+build/
+dist/
+.next/
+
+# Misc
+.DS_Store
+*.pem
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Anchor
+.anchor/
+test-ledger/
+.DS_Store
+
+# IDL
+target/idl/
+target/types/
+
+# Keys (NEVER commit private keys)
+*.json
+!package.json
+!tsconfig.json
+!tailwind.config.js
+!postcss.config.js
+
+# Vercel
+.vercel
+
+# VSCode
+.vscode/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
