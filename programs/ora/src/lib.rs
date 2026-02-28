@@ -7,6 +7,8 @@ const ORA_DECIMALS: u8 = 9;
 const INITIAL_SUPPLY: u64 = 1_050_000_000 * 1_000_000_000; // 1.05B with 9 decimals
 const MAU_GROWTH_MINT_PER_10K: u64 = 500_000 * 1_000_000_000; // 500k ORA per 10k MAU
 const MAU_GROWTH_MINT_CAP: u64 = 75_000_000 * 1_000_000_000; // 75M ORA cap
+/// Burn floor: stop burning when circulating supply < 30% of initial (315M)
+const BURN_FLOOR: u64 = 315_000_000 * 1_000_000_000; // 30% of 1.05B
 
 #[program]
 pub mod aura_ora {
@@ -81,6 +83,13 @@ pub mod aura_ora {
     pub fn burn_ora(ctx: Context<BurnOra>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
+        // Burn floor: if current supply <= 30% (315M), halt burns
+        let current_supply = ctx.accounts.ora_mint.supply;
+        require!(
+            current_supply.saturating_sub(amount) >= BURN_FLOOR,
+            ErrorCode::BurnFloorReached
+        );
+
         token::burn(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -144,20 +153,30 @@ pub mod aura_ora {
         };
 
         if burn_amount > 0 {
-            token::burn(
-                CpiContext::new(
-                    ctx.accounts.token_program.to_account_info(),
-                    Burn {
-                        mint: ctx.accounts.ora_mint.to_account_info(),
-                        from: ctx.accounts.source_token_account.to_account_info(),
-                        authority: ctx.accounts.authority.to_account_info(),
-                    },
-                ),
-                burn_amount,
-            )?;
+            // Burn floor check
+            let current_supply = ctx.accounts.ora_mint.supply;
+            let actual_burn = if current_supply.saturating_sub(burn_amount) < BURN_FLOOR {
+                current_supply.saturating_sub(BURN_FLOOR) // burn only down to floor
+            } else {
+                burn_amount
+            };
+
+            if actual_burn > 0 {
+                token::burn(
+                    CpiContext::new(
+                        ctx.accounts.token_program.to_account_info(),
+                        Burn {
+                            mint: ctx.accounts.ora_mint.to_account_info(),
+                            from: ctx.accounts.source_token_account.to_account_info(),
+                            authority: ctx.accounts.authority.to_account_info(),
+                        },
+                    ),
+                    actual_burn,
+                )?;
+            }
 
             let config = &mut ctx.accounts.ora_config;
-            config.total_burned = config.total_burned.checked_add(burn_amount).unwrap();
+            config.total_burned = config.total_burned.checked_add(actual_burn).unwrap();
         }
 
         msg!("Triple burn ({:?}): {} ORA burned from {} input", burn_type, burn_amount, amount);
@@ -221,8 +240,13 @@ pub mod aura_ora {
         let staking_portion = fee.checked_mul(40).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2% of total = 40% of fee
         let platform_portion = fee.checked_sub(burn_portion).ok_or(ErrorCode::Overflow)?.checked_sub(staking_portion).ok_or(ErrorCode::Overflow)?; // 0.5%
 
-        // Burn portion
-        if burn_portion > 0 {
+        // Burn portion (with burn floor check)
+        let actual_burn_portion = if ctx.accounts.ora_mint.supply.saturating_sub(burn_portion) < BURN_FLOOR {
+            ctx.accounts.ora_mint.supply.saturating_sub(BURN_FLOOR)
+        } else {
+            burn_portion
+        };
+        if actual_burn_portion > 0 {
             token::burn(
                 CpiContext::new(
                     ctx.accounts.token_program.to_account_info(),
@@ -232,7 +256,7 @@ pub mod aura_ora {
                         authority: ctx.accounts.payer.to_account_info(),
                     },
                 ),
-                burn_portion,
+                actual_burn_portion,
             )?;
         }
 
@@ -267,7 +291,7 @@ pub mod aura_ora {
         }
 
         let config = &mut ctx.accounts.ora_config;
-        config.total_burned = config.total_burned.checked_add(burn_portion).unwrap();
+        config.total_burned = config.total_burned.checked_add(actual_burn_portion).unwrap();
 
         msg!("Fee processed: {} total, burn={}, staking={}, platform={}", fee, burn_portion, staking_portion, platform_portion);
         Ok(())
@@ -587,6 +611,8 @@ pub enum ErrorCode {
     InvalidAmount,
     #[msg("MAU has not increased")]
     MauNotIncreased,
+    #[msg("Burn floor reached: circulating supply at 30% minimum")]
+    BurnFloorReached,
     #[msg("Unauthorized")]
     Unauthorized,
     #[msg("MAU growth mint cap reached")]

@@ -1,6 +1,22 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::TokenAccount as SplTokenAccount;
 
 declare_id!("GovernanceProgram111111111111111111111111111");
+
+/// Square root voting: vote_weight = √(ORA balance), capped at 10,000
+const MAX_VOTE_WEIGHT: u64 = 10_000;
+
+/// Integer square root (Newton's method)
+fn isqrt(n: u64) -> u64 {
+    if n == 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
 
 #[program]
 pub mod aura_governance {
@@ -60,19 +76,27 @@ pub mod aura_governance {
 
     /// Vote on a proposal
     /// FIX #3: Added VoteRecord PDA to prevent duplicate votes
+    /// Vote on proposal with √ORA voting power, capped at 10,000
     pub fn vote_on_proposal(
         ctx: Context<VoteOnProposal>,
         vote_for: bool,
-        vote_weight: u64,
     ) -> Result<()> {
         let proposal = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
 
         require!(proposal.status == ProposalStatus::Voting, ErrorCode::ProposalNotVoting);
         require!(clock.unix_timestamp < proposal.voting_ends_at, ErrorCode::VotingEnded);
+
+        // Calculate vote weight: √(ORA token balance), capped at 10,000
+        let ora_balance = ctx.accounts.voter_ora_account.amount;
+        require!(ora_balance > 0, ErrorCode::InvalidVoteWeight);
+
+        // ORA has 9 decimals, so divide first to get whole tokens
+        let whole_tokens = ora_balance / 1_000_000_000;
+        let sqrt_weight = isqrt(whole_tokens);
+        let vote_weight = sqrt_weight.min(MAX_VOTE_WEIGHT);
         require!(vote_weight > 0, ErrorCode::InvalidVoteWeight);
 
-        // Record vote (PDA ensures no duplicate)
         let vote_record = &mut ctx.accounts.vote_record;
         vote_record.voter = ctx.accounts.voter.key();
         vote_record.proposal = ctx.accounts.proposal.key();
@@ -88,7 +112,7 @@ pub mod aura_governance {
         }
         proposal.total_votes = proposal.total_votes.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?;
 
-        msg!("Voted on proposal with weight: {}", vote_weight);
+        msg!("Voted with √ORA weight: {} (balance: {} ORA)", vote_weight, whole_tokens);
         Ok(())
     }
 
@@ -321,6 +345,8 @@ pub struct VoteOnProposal<'info> {
         bump
     )]
     pub vote_record: Account<'info, VoteRecord>,
+    /// Voter's ORA token account (to read balance for √ voting)
+    pub voter_ora_account: Account<'info, anchor_spl::token::TokenAccount>,
     #[account(mut)]
     pub voter: Signer<'info>,
     pub system_program: Program<'info, System>,

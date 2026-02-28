@@ -3,121 +3,49 @@ use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount, Transfer}
 
 declare_id!("CreatorCoinProgram11111111111111111111111111");
 
+/// Fixed supply per creator coin
+const FIXED_SUPPLY: u64 = 10_000 * 1_000_000_000; // 10,000 tokens (9 decimals)
+/// Minimum followers to mint
+const MIN_FOLLOWERS_TO_MINT: u32 = 100;
+/// Trading fee: 5% unified (2.5% burn + 2% staking + 0.5% platform)
+const TRADING_FEE_BPS: u64 = 500; // 5%
+const BURN_BPS: u64 = 250;   // 2.5%
+const STAKING_BPS: u64 = 200; // 2%
+const PLATFORM_BPS: u64 = 50; // 0.5%
+
 #[program]
 pub mod aura_creator_coin {
     use super::*;
 
-    /// Create a new Creator Coin (requires burning 1000 ORA)
+    /// Mint a Creator Coin — FREE, but requires 100+ followers
+    /// Fixed supply: 10,000 tokens, all go to creator initially
     pub fn create_creator_coin(
         ctx: Context<CreateCreatorCoin>,
         symbol: String,
-        curve_type: CurveType,
-        curve_param_k: u64,
-        curve_param_n: u32,
-        creator_fee_bps: u16,
     ) -> Result<()> {
         require!(symbol.len() <= 10, ErrorCode::SymbolTooLong);
-        require!(curve_param_n >= 1 && curve_param_n <= 3, ErrorCode::InvalidCurveParameter);
-        require!(creator_fee_bps <= 1000, ErrorCode::InvalidCreatorFee); // Max 10%
 
-        // Burn 1000 ORA tokens
-        let burn_amount = 1000 * 10u64.pow(9); // Assuming 9 decimals for ORA
-        token::burn(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Burn {
-                    mint: ctx.accounts.ora_mint.to_account_info(),
-                    from: ctx.accounts.creator_ora_account.to_account_info(),
-                    authority: ctx.accounts.creator.to_account_info(),
-                },
-            ),
-            burn_amount,
-        )?;
+        // Verify follower count from UserProfile
+        let profile = &ctx.accounts.creator_profile;
+        require!(
+            profile.follower_count >= MIN_FOLLOWERS_TO_MINT,
+            ErrorCode::InsufficientFollowers
+        );
 
         let creator_coin = &mut ctx.accounts.creator_coin;
         creator_coin.creator = ctx.accounts.creator.key();
         creator_coin.mint = ctx.accounts.creator_coin_mint.key();
         creator_coin.symbol = symbol.clone();
-        creator_coin.total_supply = 0;
-        creator_coin.reserve_balance = 0;
-        creator_coin.curve_type = curve_type;
-        creator_coin.curve_param_k = curve_param_k;
-        creator_coin.curve_param_n = curve_param_n;
-        creator_coin.creator_fee_bps = creator_fee_bps;
-        creator_coin.total_fees_collected = 0;
+        creator_coin.total_supply = FIXED_SUPPLY;
+        creator_coin.total_trading_volume = 0;
+        creator_coin.total_burned = 0;
         creator_coin.created_at = Clock::get()?.unix_timestamp;
         creator_coin.bump = ctx.bumps.creator_coin;
 
-        msg!(
-            "Creator Coin created: {} by {} (burned 1000 ORA)",
-            symbol,
-            creator_coin.creator
-        );
-        Ok(())
-    }
-
-    /// Buy creator coins using SOL
-    pub fn buy_creator_coin(ctx: Context<BuyCreatorCoin>, amount: u64) -> Result<()> {
-        require!(amount > 0, ErrorCode::InvalidAmount);
-
-        let creator_coin = &mut ctx.accounts.creator_coin;
-        let current_supply = creator_coin.total_supply;
-
-        // Calculate buy price using bonding curve
-        let total_cost = calculate_buy_price(
-            current_supply,
-            amount,
-            creator_coin.curve_param_k,
-            creator_coin.curve_param_n,
-        )?;
-
-        require!(total_cost > 0, ErrorCode::InvalidPrice);
-
-        // Calculate creator fee
-        let creator_fee = (total_cost as u128)
-            .checked_mul(creator_coin.creator_fee_bps as u128)
-            .unwrap()
-            .checked_div(10000)
-            .unwrap() as u64;
-
-        let reserve_amount = total_cost.checked_sub(creator_fee).ok_or(ErrorCode::Overflow)?;
-
-        // Transfer SOL from buyer to reserve vault
-        let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
-            &ctx.accounts.buyer.key(),
-            &ctx.accounts.reserve_vault.key(),
-            reserve_amount,
-        );
-        anchor_lang::solana_program::program::invoke(
-            &transfer_ix,
-            &[
-                ctx.accounts.buyer.to_account_info(),
-                ctx.accounts.reserve_vault.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-        )?;
-
-        // Transfer creator fee to creator
-        if creator_fee > 0 {
-            let fee_transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
-                &ctx.accounts.buyer.key(),
-                &ctx.accounts.creator.key(),
-                creator_fee,
-            );
-            anchor_lang::solana_program::program::invoke(
-                &fee_transfer_ix,
-                &[
-                    ctx.accounts.buyer.to_account_info(),
-                    ctx.accounts.creator.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                ],
-            )?;
-        }
-
-        // Mint creator coins to buyer
+        // Mint all 10,000 tokens to creator
         let seeds = &[
             b"creator_coin",
-            creator_coin.creator.as_ref(),
+            ctx.accounts.creator.key().as_ref(),
             &[creator_coin.bump],
         ];
         let signer = &[&seeds[..]];
@@ -127,365 +55,239 @@ pub mod aura_creator_coin {
                 ctx.accounts.token_program.to_account_info(),
                 MintTo {
                     mint: ctx.accounts.creator_coin_mint.to_account_info(),
-                    to: ctx.accounts.buyer_token_account.to_account_info(),
+                    to: ctx.accounts.creator_token_account.to_account_info(),
                     authority: ctx.accounts.creator_coin.to_account_info(),
                 },
                 signer,
             ),
-            amount,
+            FIXED_SUPPLY,
         )?;
 
-        // Update state
-        creator_coin.total_supply = creator_coin.total_supply.checked_add(amount).ok_or(ErrorCode::Overflow)?;
-        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_add(reserve_amount).ok_or(ErrorCode::Overflow)?;
-        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).ok_or(ErrorCode::Overflow)?;
-
-        msg!(
-            "Bought {} {} tokens for {} lamports (fee: {})",
-            amount,
-            creator_coin.symbol,
-            total_cost,
-            creator_fee
-        );
+        msg!("Creator Coin '{}' minted: 10,000 tokens to {}", symbol, creator_coin.creator);
         Ok(())
     }
 
-    /// Sell creator coins back to SOL
-    pub fn sell_creator_coin(ctx: Context<SellCreatorCoin>, amount: u64) -> Result<()> {
+    /// Buy creator coins on secondary market (P2P via orderbook/AMM)
+    /// 5% fee: 2.5% burn + 2% staking + 0.5% platform
+    pub fn trade_with_fee(
+        ctx: Context<TradeWithFee>,
+        amount: u64,
+        price_lamports: u64,
+    ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
+        require!(price_lamports > 0, ErrorCode::InvalidPrice);
 
-        let creator_coin = &mut ctx.accounts.creator_coin;
-        let current_supply = creator_coin.total_supply;
+        let total_cost = price_lamports;
 
-        require!(current_supply >= amount, ErrorCode::InsufficientSupply);
+        // Calculate fee split
+        let burn_amount = total_cost.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let staking_amount = total_cost.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let platform_amount = total_cost.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let seller_receives = total_cost
+            .checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(platform_amount).ok_or(ErrorCode::Overflow)?;
 
-        // Calculate sell price using bonding curve (always slightly less than buy price)
-        let new_supply = current_supply.checked_sub(amount).ok_or(ErrorCode::Overflow)?;
-        let total_return = calculate_buy_price(
-            new_supply,
-            amount,
-            creator_coin.curve_param_k,
-            creator_coin.curve_param_n,
-        )?;
-
-        require!(total_return > 0, ErrorCode::InvalidPrice);
-        require!(creator_coin.reserve_balance >= total_return, ErrorCode::InsufficientReserve);
-
-        // Calculate creator fee on sell
-        let creator_fee = (total_return as u128)
-            .checked_mul(creator_coin.creator_fee_bps as u128)
-            .unwrap()
-            .checked_div(10000)
-            .unwrap() as u64;
-
-        let seller_return = total_return.checked_sub(creator_fee).ok_or(ErrorCode::Overflow)?;
-
-        // Burn creator coins from seller
-        token::burn(
+        // Transfer Creator Coins: seller → buyer
+        token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
-                Burn {
-                    mint: ctx.accounts.creator_coin_mint.to_account_info(),
-                    from: ctx.accounts.seller_token_account.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.seller_coin_account.to_account_info(),
+                    to: ctx.accounts.buyer_coin_account.to_account_info(),
                     authority: ctx.accounts.seller.to_account_info(),
                 },
             ),
             amount,
         )?;
 
-        // Transfer SOL from reserve vault to seller
-        let seeds = &[
-            b"reserve_vault",
-            creator_coin.creator.as_ref(),
-            &[ctx.bumps.reserve_vault],
-        ];
-        let signer = &[&seeds[..]];
+        // Transfer ORA: buyer → seller (minus fees)
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.buyer_ora_account.to_account_info(),
+                    to: ctx.accounts.seller_ora_account.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            ),
+            seller_receives,
+        )?;
 
-        **ctx.accounts.reserve_vault.to_account_info().try_borrow_mut_lamports()? -= seller_return;
-        **ctx.accounts.seller.to_account_info().try_borrow_mut_lamports()? += seller_return;
-
-        // Transfer creator fee from reserve to creator
-        if creator_fee > 0 {
-            **ctx.accounts.reserve_vault.to_account_info().try_borrow_mut_lamports()? -= creator_fee;
-            **ctx.accounts.creator.to_account_info().try_borrow_mut_lamports()? += creator_fee;
+        // Burn 2.5%
+        if burn_amount > 0 {
+            token::burn(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    Burn {
+                        mint: ctx.accounts.ora_mint.to_account_info(),
+                        from: ctx.accounts.buyer_ora_account.to_account_info(),
+                        authority: ctx.accounts.buyer.to_account_info(),
+                    },
+                ),
+                burn_amount,
+            )?;
         }
 
-        // Update state
-        creator_coin.total_supply = creator_coin.total_supply.checked_sub(amount).ok_or(ErrorCode::Overflow)?;
-        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_sub(total_return).ok_or(ErrorCode::Overflow)?;
-        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).ok_or(ErrorCode::Overflow)?;
+        // Staking pool 2%
+        if staking_amount > 0 {
+            token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.buyer_ora_account.to_account_info(),
+                        to: ctx.accounts.staking_pool.to_account_info(),
+                        authority: ctx.accounts.buyer.to_account_info(),
+                    },
+                ),
+                staking_amount,
+            )?;
+        }
+
+        // Platform 0.5%
+        if platform_amount > 0 {
+            token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.buyer_ora_account.to_account_info(),
+                        to: ctx.accounts.platform_treasury.to_account_info(),
+                        authority: ctx.accounts.buyer.to_account_info(),
+                    },
+                ),
+                platform_amount,
+            )?;
+        }
+
+        // Update stats
+        let creator_coin = &mut ctx.accounts.creator_coin;
+        creator_coin.total_trading_volume = creator_coin.total_trading_volume
+            .checked_add(total_cost).ok_or(ErrorCode::Overflow)?;
+        creator_coin.total_burned = creator_coin.total_burned
+            .checked_add(burn_amount).ok_or(ErrorCode::Overflow)?;
 
         msg!(
-            "Sold {} {} tokens for {} lamports (fee: {})",
-            amount,
-            creator_coin.symbol,
-            seller_return,
-            creator_fee
+            "Trade: {} coins for {} ORA (burn={} staking={} platform={})",
+            amount, total_cost, burn_amount, staking_amount, platform_amount
         );
         Ok(())
     }
-
-    /// Withdraw accumulated creator fees
-    pub fn withdraw_creator_fees(ctx: Context<WithdrawCreatorFees>) -> Result<()> {
-        let creator_coin = &ctx.accounts.creator_coin;
-        
-        msg!(
-            "Creator withdrew {} lamports in fees",
-            creator_coin.total_fees_collected
-        );
-        Ok(())
-    }
 }
 
-/// Calculate buy price using bonding curve: Price = k * Supply^n
-/// Uses integration: ∫ k * x^n dx from supply to supply+amount
-fn calculate_buy_price(
-    current_supply: u64,
-    amount: u64,
-    k: u64,
-    n: u32,
-) -> Result<u64> {
-    // Prevent overflow by using u128 for calculations
-    let supply_u128 = current_supply as u128;
-    let amount_u128 = amount as u128;
-    let k_u128 = k as u128;
-    let n_u128 = n as u128;
+// === Account Structures ===
 
-    // For Price = k * Supply^n, the integral is:
-    // ∫ k * x^n dx = k * x^(n+1) / (n+1)
-    
-    let n_plus_1 = n_u128.checked_add(1).ok_or(ErrorCode::Overflow)?;
-    
-    // Calculate for supply + amount
-    let end_supply = supply_u128.checked_add(amount_u128).unwrap();
-    let end_value = calculate_integral_value(end_supply, k_u128, n_u128, n_plus_1)?;
-    
-    // Calculate for current supply
-    let start_value = if supply_u128 == 0 {
-        0
-    } else {
-        calculate_integral_value(supply_u128, k_u128, n_u128, n_plus_1)?
-    };
-    
-    // Total cost is the difference
-    let total_cost = end_value.checked_sub(start_value).unwrap();
-    
-    // Convert back to u64, ensure it doesn't overflow
-    require!(total_cost <= u64::MAX as u128, ErrorCode::PriceOverflow);
-    
-    Ok(total_cost as u64)
-}
-
-/// Calculate integral value: k * x^(n+1) / (n+1)
-fn calculate_integral_value(x: u128, k: u128, n: u128, n_plus_1: u128) -> Result<u128> {
-    // x^(n+1)
-    let mut x_power = x;
-    for _ in 0..n {
-        x_power = x_power.checked_mul(x).ok_or(ErrorCode::CalculationOverflow)?;
-    }
-    
-    // k * x^(n+1)
-    let numerator = k.checked_mul(x_power).ok_or(ErrorCode::CalculationOverflow)?;
-    
-    // Divide by (n+1)
-    let result = numerator.checked_div(n_plus_1).unwrap();
-    
-    Ok(result)
-}
-
-// Account structures
 #[account]
 pub struct CreatorCoin {
     pub creator: Pubkey,              // 32
     pub mint: Pubkey,                 // 32
-    pub symbol: String,               // 4 + 10 = 14
+    pub symbol: String,               // 4 + 10
     pub total_supply: u64,            // 8
-    pub reserve_balance: u64,         // 8 (SOL in reserve)
-    pub curve_type: CurveType,        // 1
-    pub curve_param_k: u64,           // 8
-    pub curve_param_n: u32,           // 4
-    pub creator_fee_bps: u16,         // 2 (basis points, e.g., 500 = 5%)
-    pub total_fees_collected: u64,   // 8
+    pub total_trading_volume: u64,    // 8
+    pub total_burned: u64,            // 8
     pub created_at: i64,              // 8
     pub bump: u8,                     // 1
 }
 
-// Enums
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum CurveType {
-    Linear,      // Price = k * Supply
-    Quadratic,   // Price = k * Supply^2
-    Cubic,       // Price = k * Supply^3
+/// Reference to core::UserProfile (read-only for follower check)
+#[account]
+pub struct UserProfile {
+    pub authority: Pubkey,
+    pub username: String,
+    pub profile_uri: String,
+    pub reputation_score: u32,
+    pub follower_count: u32,
+    pub following_count: u32,
+    pub post_count: u32,
+    pub created_at: i64,
+    pub bump: u8,
 }
 
-// Context structures
+// === Contexts ===
+
 #[derive(Accounts)]
 #[instruction(symbol: String)]
 pub struct CreateCreatorCoin<'info> {
     #[account(
-        init,
-        payer = creator,
-        space = 8 + 32 + 32 + 14 + 8 + 8 + 1 + 8 + 4 + 2 + 8 + 8 + 1,
+        init, payer = creator,
+        space = 8 + 32 + 32 + (4 + 10) + 8 + 8 + 8 + 8 + 1,
         seeds = [b"creator_coin", creator.key().as_ref()],
         bump
     )]
     pub creator_coin: Account<'info, CreatorCoin>,
-    
-    /// Creator coin SPL token mint
+
     #[account(
-        init,
-        payer = creator,
+        init, payer = creator,
         mint::decimals = 9,
         mint::authority = creator_coin,
         seeds = [b"creator_coin_mint", creator.key().as_ref()],
         bump
     )]
     pub creator_coin_mint: Account<'info, Mint>,
-    
-    /// Reserve vault to hold SOL
-    #[account(
-        init,
-        payer = creator,
-        space = 8,
-        seeds = [b"reserve_vault", creator.key().as_ref()],
-        bump
-    )]
-    /// CHECK: This is a PDA that holds SOL
-    pub reserve_vault: AccountInfo<'info>,
-    
-    /// ORA token mint (for burning)
-    pub ora_mint: Account<'info, Mint>,
-    
-    /// Creator's ORA token account (to burn from)
+
+    /// Creator's token account to receive initial supply
     #[account(mut)]
-    pub creator_ora_account: Account<'info, TokenAccount>,
-    
+    pub creator_token_account: Account<'info, TokenAccount>,
+
+    /// Creator's UserProfile (to check follower_count >= 100)
+    #[account(
+        seeds = [b"user", creator.key().as_ref()],
+        bump = creator_profile.bump,
+        constraint = creator_profile.authority == creator.key() @ ErrorCode::Unauthorized
+    )]
+    pub creator_profile: Account<'info, UserProfile>,
+
     #[account(mut)]
     pub creator: Signer<'info>,
-    
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
-pub struct BuyCreatorCoin<'info> {
+pub struct TradeWithFee<'info> {
     #[account(
         mut,
         seeds = [b"creator_coin", creator_coin.creator.as_ref()],
         bump = creator_coin.bump
     )]
     pub creator_coin: Account<'info, CreatorCoin>,
-    
-    #[account(
-        mut,
-        seeds = [b"creator_coin_mint", creator_coin.creator.as_ref()],
-        bump
-    )]
-    pub creator_coin_mint: Account<'info, Mint>,
-    
-    #[account(
-        mut,
-        seeds = [b"reserve_vault", creator_coin.creator.as_ref()],
-        bump
-    )]
-    /// CHECK: This is a PDA that holds SOL
-    pub reserve_vault: AccountInfo<'info>,
-    
-    /// Buyer's token account to receive creator coins
+
+    // Seller's creator coin account
     #[account(mut)]
-    pub buyer_token_account: Account<'info, TokenAccount>,
-    
+    pub seller_coin_account: Account<'info, TokenAccount>,
+    // Buyer's creator coin account
+    #[account(mut)]
+    pub buyer_coin_account: Account<'info, TokenAccount>,
+    // Buyer's ORA account (pays)
+    #[account(mut)]
+    pub buyer_ora_account: Account<'info, TokenAccount>,
+    // Seller's ORA account (receives)
+    #[account(mut)]
+    pub seller_ora_account: Account<'info, TokenAccount>,
+    // Staking pool
+    #[account(mut)]
+    pub staking_pool: Account<'info, TokenAccount>,
+    // Platform treasury
+    #[account(mut)]
+    pub platform_treasury: Account<'info, TokenAccount>,
+    // ORA mint (for burn)
+    #[account(mut)]
+    pub ora_mint: Account<'info, Mint>,
+
+    pub seller: Signer<'info>,
     #[account(mut)]
     pub buyer: Signer<'info>,
-    
-    /// CHECK: Creator to receive fees
-    #[account(mut)]
-    pub creator: AccountInfo<'info>,
-    
     pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
 }
 
-#[derive(Accounts)]
-pub struct SellCreatorCoin<'info> {
-    #[account(
-        mut,
-        seeds = [b"creator_coin", creator_coin.creator.as_ref()],
-        bump = creator_coin.bump
-    )]
-    pub creator_coin: Account<'info, CreatorCoin>,
-    
-    #[account(
-        mut,
-        seeds = [b"creator_coin_mint", creator_coin.creator.as_ref()],
-        bump
-    )]
-    pub creator_coin_mint: Account<'info, Mint>,
-    
-    #[account(
-        mut,
-        seeds = [b"reserve_vault", creator_coin.creator.as_ref()],
-        bump
-    )]
-    /// CHECK: This is a PDA that holds SOL
-    pub reserve_vault: AccountInfo<'info>,
-    
-    /// Seller's token account to burn creator coins from
-    #[account(mut)]
-    pub seller_token_account: Account<'info, TokenAccount>,
-    
-    #[account(mut)]
-    pub seller: Signer<'info>,
-    
-    /// CHECK: Creator to receive fees
-    #[account(mut)]
-    pub creator: AccountInfo<'info>,
-    
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-}
+// === Errors ===
 
-#[derive(Accounts)]
-pub struct WithdrawCreatorFees<'info> {
-    #[account(
-        seeds = [b"creator_coin", creator.key().as_ref()],
-        bump = creator_coin.bump,
-        has_one = creator
-    )]
-    pub creator_coin: Account<'info, CreatorCoin>,
-    
-    #[account(mut)]
-    pub creator: Signer<'info>,
-}
-
-// Error codes
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Symbol is too long (max 10 characters)")]
-    SymbolTooLong,
-    
-    #[msg("Invalid curve parameter (n must be 1-3)")]
-    InvalidCurveParameter,
-    
-    #[msg("Invalid creator fee (max 10%)")]
-    InvalidCreatorFee,
-    
-    #[msg("Invalid amount")]
-    InvalidAmount,
-    
-    #[msg("Invalid price calculated")]
-    InvalidPrice,
-    
-    #[msg("Insufficient supply to sell")]
-    InsufficientSupply,
-    
-    #[msg("Insufficient reserve balance")]
-    InsufficientReserve,
-    
-    #[msg("Price calculation overflow")]
-    PriceOverflow,
-    
-    #[msg("Calculation overflow")]
-    CalculationOverflow,
+    #[msg("Symbol too long (max 10)")] SymbolTooLong,
+    #[msg("Need 100+ followers to mint Creator Coin")] InsufficientFollowers,
+    #[msg("Invalid amount")] InvalidAmount,
+    #[msg("Invalid price")] InvalidPrice,
+    #[msg("Unauthorized")] Unauthorized,
+    #[msg("Overflow")] Overflow,
 }
