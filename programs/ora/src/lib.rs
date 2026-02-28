@@ -118,7 +118,7 @@ pub mod aura_ora {
         let burn_amount = match burn_type {
             BurnType::IncentiveTax => {
                 // 10% of reward distribution gets burned
-                amount.checked_mul(10).unwrap().checked_div(100).unwrap()
+                amount.checked_mul(10).unwrap().checked_div(100).ok_or(ErrorCode::Overflow)?
             }
             BurnType::TransactionFee => {
                 // 2.5% of 5% unified fee → burned, with MAU multiplier (1.2x~1.5x)
@@ -139,7 +139,7 @@ pub mod aura_ora {
             }
             BurnType::TypeBFeature => {
                 // 95% of feature payments burned
-                amount.checked_mul(95).unwrap().checked_div(100).unwrap()
+                amount.checked_mul(95).unwrap().checked_div(100).ok_or(ErrorCode::Overflow)?
             }
         };
 
@@ -187,7 +187,7 @@ pub mod aura_ora {
         let total_reward = base.checked_add(bonus).unwrap();
 
         // Burn 10% (incentive tax)
-        let burn_amount = total_reward.checked_mul(10).unwrap().checked_div(100).unwrap();
+        let burn_amount = total_reward.checked_mul(10).unwrap().checked_div(100).ok_or(ErrorCode::Overflow)?;
         let net_reward = total_reward.checked_sub(burn_amount).unwrap();
 
         let config_bump = config.bump;
@@ -216,10 +216,10 @@ pub mod aura_ora {
     pub fn process_fee(ctx: Context<ProcessFee>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
-        let fee = amount.checked_mul(5).unwrap().checked_div(100).unwrap(); // 5%
-        let burn_portion = fee.checked_mul(50).unwrap().checked_div(100).unwrap(); // 2.5% of total = 50% of fee
-        let staking_portion = fee.checked_mul(40).unwrap().checked_div(100).unwrap(); // 2% of total = 40% of fee
-        let platform_portion = fee.checked_sub(burn_portion).unwrap().checked_sub(staking_portion).unwrap(); // 0.5%
+        let fee = amount.checked_mul(5).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 5%
+        let burn_portion = fee.checked_mul(50).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2.5% of total = 50% of fee
+        let staking_portion = fee.checked_mul(40).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2% of total = 40% of fee
+        let platform_portion = fee.checked_sub(burn_portion).ok_or(ErrorCode::Overflow)?.checked_sub(staking_portion).ok_or(ErrorCode::Overflow)?; // 0.5%
 
         // Burn portion
         if burn_portion > 0 {
@@ -290,7 +290,7 @@ pub mod aura_ora {
             return Ok(());
         }
 
-        let mint_amount = checkpoints.checked_mul(MAU_GROWTH_MINT_PER_10K).unwrap();
+        let mint_amount = checkpoints.checked_mul(MAU_GROWTH_MINT_PER_10K).ok_or(ErrorCode::Overflow)?;
         let remaining_cap = MAU_GROWTH_MINT_CAP.saturating_sub(mau_growth_minted);
         let actual_mint = mint_amount.min(remaining_cap);
 

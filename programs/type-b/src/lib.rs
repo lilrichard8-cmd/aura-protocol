@@ -23,8 +23,8 @@ pub mod aura_type_b {
         let record = &mut ctx.accounts.payment_record;
         record.payer = ctx.accounts.payer.key();
         record.amount = amount;
-        record.burned = amount.checked_mul(BURN_BPS).unwrap() / 10000;
-        record.platform_fee = amount.checked_mul(PLATFORM_BPS).unwrap() / 10000;
+        record.burned = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        record.platform_fee = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         record.feature_type = FeatureType::BoostContent;
         record.content_id = content_id;
         record.timestamp = Clock::get()?.unix_timestamp;
@@ -46,8 +46,8 @@ pub mod aura_type_b {
         let record = &mut ctx.accounts.payment_record;
         record.payer = ctx.accounts.payer.key();
         record.amount = amount;
-        record.burned = amount.checked_mul(BURN_BPS).unwrap() / 10000;
-        record.platform_fee = amount.checked_mul(PLATFORM_BPS).unwrap() / 10000;
+        record.burned = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        record.platform_fee = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         record.feature_type = FeatureType::PinContent;
         record.content_id = content_id;
         record.timestamp = Clock::get()?.unix_timestamp;
@@ -69,8 +69,8 @@ pub mod aura_type_b {
         let record = &mut ctx.accounts.payment_record;
         record.payer = ctx.accounts.payer.key();
         record.amount = amount;
-        record.burned = amount.checked_mul(BURN_BPS).unwrap() / 10000;
-        record.platform_fee = amount.checked_mul(PLATFORM_BPS).unwrap() / 10000;
+        record.burned = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        record.platform_fee = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         record.feature_type = FeatureType::Cosmetic;
         record.content_id = content_id;
         record.timestamp = Clock::get()?.unix_timestamp;
@@ -92,8 +92,8 @@ pub mod aura_type_b {
         let record = &mut ctx.accounts.payment_record;
         record.payer = ctx.accounts.payer.key();
         record.amount = amount;
-        record.burned = amount.checked_mul(BURN_BPS).unwrap() / 10000;
-        record.platform_fee = amount.checked_mul(PLATFORM_BPS).unwrap() / 10000;
+        record.burned = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        record.platform_fee = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         record.feature_type = FeatureType::AIFeature;
         record.content_id = content_id;
         record.timestamp = Clock::get()?.unix_timestamp;
@@ -108,8 +108,8 @@ pub mod aura_type_b {
 fn process_type_b_payment(ctx: &Context<TypeBPayment>, amount: u64) -> Result<()> {
     require!(amount > 0, ErrorCode::InvalidAmount);
 
-    let burn_amount = amount.checked_mul(BURN_BPS).unwrap() / 10000;
-    let platform_amount = amount.checked_sub(burn_amount).unwrap();
+    let burn_amount = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+    let platform_amount = amount.checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?;
 
     // Burn 95%
     token::burn(

@@ -164,49 +164,6 @@ pub mod aura_livestream {
         Ok(())
     }
 
-
-    /// Renew an existing subscription
-    /// FIX #13: Allow renewal of expired subscriptions
-    pub fn renew_subscription(
-        ctx: Context<RenewSubscription>,
-        monthly_amount: u64,
-    ) -> Result<()> {
-        require!(monthly_amount > 0, ErrorCode::InvalidAmount);
-
-        let fee = monthly_amount * FEE_BPS / 10000;
-        let creator_amount = monthly_amount - fee;
-
-        token::transfer(CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.fan_token_account.to_account_info(),
-                to: ctx.accounts.creator_token_account.to_account_info(),
-                authority: ctx.accounts.fan.to_account_info(),
-            },
-        ), creator_amount)?;
-
-        token::transfer(CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.fan_token_account.to_account_info(),
-                to: ctx.accounts.platform_treasury.to_account_info(),
-                authority: ctx.accounts.fan.to_account_info(),
-            },
-        ), fee)?;
-
-        let sub = &mut ctx.accounts.subscription;
-        let now = Clock::get()?.unix_timestamp;
-        // If still active, extend from current expiry; otherwise from now
-        let base_time = if sub.expires_at > now { sub.expires_at } else { now };
-        sub.monthly_amount = monthly_amount;
-        sub.expires_at = base_time + 30 * 86400;
-        sub.is_active = true;
-
-        msg!("Subscription renewed: fan={} creator={}", sub.fan, sub.creator);
-        Ok(())
-    }
-
-    /// Renew an existing subscription (FIX #13)
     pub fn renew_subscription(ctx: Context<RenewSubscription>, monthly_amount: u64) -> Result<()> {
         require!(monthly_amount > 0, ErrorCode::InvalidAmount);
 
@@ -240,8 +197,6 @@ pub mod aura_livestream {
         sub.is_active = true;
 
         msg!("Subscription renewed until {}", sub.expires_at);
-        Ok(())
-    }
 
     /// Creator sets up a pay-per-view event
     pub fn create_pay_per_view(
@@ -565,27 +520,7 @@ pub struct PurchasePPV<'info> {
 }
 
 
-#[derive(Accounts)]
-pub struct RenewSubscription<'info> {
-    #[account(
-        mut,
-        seeds = [b"subscription", subscription.creator.as_ref(), fan.key().as_ref()],
-        bump = subscription.bump,
-        constraint = subscription.fan == fan.key() @ ErrorCode::InvalidAmount
-    )]
-    pub subscription: Account<'info, Subscription>,
 
-    #[account(mut)]
-    pub fan_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub platform_treasury: Account<'info, TokenAccount>,
-
-    #[account(mut)]
-    pub fan: Signer<'info>,
-    pub token_program: Program<'info, Token>,
-}
 #[derive(Accounts)]
 pub struct CreatorCoinTipBoost<'info> {
     pub tip_record: Account<'info, TipRecord>,
