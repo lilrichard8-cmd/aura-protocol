@@ -114,11 +114,11 @@ pub mod aura_content_license {
             );
             system_program::transfer(cpi_context, amount)?;
 
-            license.total_embed_revenue = license.total_embed_revenue.checked_add(amount).unwrap();
+            license.total_embed_revenue = license.total_embed_revenue.checked_add(amount).ok_or(ErrorCode::LicenseNotActive)?;
         }
 
         // Increment embed count
-        license.total_embeds = license.total_embeds.checked_add(1).unwrap();
+        license.total_embeds = license.total_embeds.checked_add(1).ok_or(ErrorCode::LicenseNotActive)?;
 
         // Create embed record
         let embed_record = &mut ctx.accounts.embed_record;
@@ -176,11 +176,11 @@ pub mod aura_content_license {
             );
             system_program::transfer(cpi_context, amount)?;
 
-            license.total_remix_revenue = license.total_remix_revenue.checked_add(amount).unwrap();
+            license.total_remix_revenue = license.total_remix_revenue.checked_add(amount).ok_or(ErrorCode::LicenseNotActive)?;
         }
 
         // Increment remix count
-        license.total_remixes = license.total_remixes.checked_add(1).unwrap();
+        license.total_remixes = license.total_remixes.checked_add(1).ok_or(ErrorCode::LicenseNotActive)?;
 
         // Create remix record
         let remix_record = &mut ctx.accounts.remix_record;
@@ -249,7 +249,7 @@ pub mod aura_content_license {
         }
 
         // Update total revenue
-        remix_record.total_revenue = remix_record.total_revenue.checked_add(amount).unwrap();
+        remix_record.total_revenue = remix_record.total_revenue.checked_add(amount).ok_or(ErrorCode::LicenseNotActive)?;
 
         msg!(
             "Remix revenue distributed. Creator royalty: {}, Remixer: {}",
@@ -380,6 +380,7 @@ pub struct PayToEmbed<'info> {
     pub embedder: Signer<'info>,
 
     /// CHECK: Creator receives payment
+    #[account(mut, constraint = creator.key() == content_license.creator @ ErrorCode::InvalidCreator)]
     #[account(mut)]
     pub creator: AccountInfo<'info>,
 
@@ -408,6 +409,7 @@ pub struct PayToRemix<'info> {
     pub remixer: Signer<'info>,
 
     /// CHECK: Creator receives payment
+    #[account(mut, constraint = creator.key() == content_license.creator @ ErrorCode::InvalidCreator)]
     #[account(mut)]
     pub creator: AccountInfo<'info>,
 
@@ -470,4 +472,7 @@ pub enum ErrorCode {
 
     #[msg("License is not active")]
     LicenseNotActive,
+
+    #[msg("Creator does not match license")]
+    InvalidCreator,
 }

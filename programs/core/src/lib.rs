@@ -31,6 +31,7 @@ pub mod aura_core {
     }
 
     /// Publish new content
+    /// FIX #2: Removed separate authority account, author IS the authority
     pub fn publish_content(
         ctx: Context<PublishContent>,
         arweave_tx_id: String,
@@ -53,32 +54,72 @@ pub mod aura_core {
         post.is_active = true;
         post.bump = ctx.bumps.post;
 
-        // Increment user's post count
         let profile = &mut ctx.accounts.user_profile;
-        profile.post_count = profile.post_count.checked_add(1).unwrap();
+        profile.post_count = profile.post_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         msg!("Content published: {}", post.arweave_tx_id);
         Ok(())
     }
 
     /// Follow a user
+    /// FIX #1: Added authority validation + duplicate follow prevention via PDA
     pub fn follow_user(ctx: Context<FollowUser>) -> Result<()> {
         let follower_profile = &mut ctx.accounts.follower_profile;
         let target_profile = &mut ctx.accounts.target_profile;
 
-        follower_profile.following_count = follower_profile.following_count.checked_add(1).unwrap();
-        target_profile.follower_count = target_profile.follower_count.checked_add(1).unwrap();
+        // Prevent self-follow
+        require!(
+            follower_profile.authority != target_profile.authority,
+            ErrorCode::CannotFollowSelf
+        );
+
+        follower_profile.following_count = follower_profile.following_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
+        target_profile.follower_count = target_profile.follower_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
+
+        let follow_record = &mut ctx.accounts.follow_record;
+        follow_record.follower = follower_profile.authority;
+        follow_record.target = target_profile.authority;
+        follow_record.created_at = Clock::get()?.unix_timestamp;
+        follow_record.bump = ctx.bumps.follow_record;
 
         msg!("User followed");
         Ok(())
     }
 
+    /// Unfollow a user
+    pub fn unfollow_user(ctx: Context<UnfollowUser>) -> Result<()> {
+        let follower_profile = &mut ctx.accounts.follower_profile;
+        let target_profile = &mut ctx.accounts.target_profile;
+
+        follower_profile.following_count = follower_profile.following_count.saturating_sub(1);
+        target_profile.follower_count = target_profile.follower_count.saturating_sub(1);
+
+        msg!("User unfollowed");
+        Ok(())
+    }
+
     /// Like a post
+    /// FIX #1: Added duplicate like prevention via LikeRecord PDA
     pub fn like_post(ctx: Context<LikePost>) -> Result<()> {
         let post = &mut ctx.accounts.post;
-        post.likes = post.likes.checked_add(1).unwrap();
+        post.likes = post.likes.checked_add(1).ok_or(ErrorCode::Overflow)?;
+
+        let like_record = &mut ctx.accounts.like_record;
+        like_record.user = ctx.accounts.user.key();
+        like_record.post = ctx.accounts.post.key();
+        like_record.created_at = Clock::get()?.unix_timestamp;
+        like_record.bump = ctx.bumps.like_record;
 
         msg!("Post liked");
+        Ok(())
+    }
+
+    /// Unlike a post
+    pub fn unlike_post(ctx: Context<UnlikePost>) -> Result<()> {
+        let post = &mut ctx.accounts.post;
+        post.likes = post.likes.saturating_sub(1);
+
+        msg!("Post unliked");
         Ok(())
     }
 
@@ -126,6 +167,23 @@ pub struct Post {
     pub bump: u8,
 }
 
+// FIX #1: New accounts for duplicate prevention
+#[account]
+pub struct FollowRecord {
+    pub follower: Pubkey,
+    pub target: Pubkey,
+    pub created_at: i64,
+    pub bump: u8,
+}
+
+#[account]
+pub struct LikeRecord {
+    pub user: Pubkey,
+    pub post: Pubkey,
+    pub created_at: i64,
+    pub bump: u8,
+}
+
 // Enums
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
 pub enum ContentType {
@@ -150,65 +208,121 @@ pub struct RegisterUser<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 36 + 204 + 4 + 4 + 4 + 4 + 8 + 1,
+        space = 8 + 32 + (4 + 32) + (4 + 200) + 4 + 4 + 4 + 4 + 8 + 1,
         seeds = [b"user", authority.key().as_ref()],
         bump
     )]
     pub user_profile: Account<'info, UserProfile>,
-    
     #[account(mut)]
     pub authority: Signer<'info>,
-    
     pub system_program: Program<'info, System>,
 }
 
+// FIX #2: author is the signer AND the authority, validated via has_one
 #[derive(Accounts)]
 pub struct PublishContent<'info> {
     #[account(
         init,
         payer = author,
-        space = 8 + 32 + 47 + 1 + 1 + 8 + 8 + 8 + 8 + 8 + 1 + 1,
+        space = 8 + 32 + (4 + 43) + 1 + 1 + 8 + 8 + 8 + 8 + 8 + 1 + 1,
         seeds = [b"post", author.key().as_ref(), &user_profile.post_count.to_le_bytes()],
         bump
     )]
     pub post: Account<'info, Post>,
-    
-    #[account(mut, has_one = authority)]
+    #[account(
+        mut,
+        seeds = [b"user", author.key().as_ref()],
+        bump = user_profile.bump,
+        has_one = authority @ ErrorCode::Unauthorized
+    )]
     pub user_profile: Account<'info, UserProfile>,
-    
     #[account(mut)]
     pub author: Signer<'info>,
-    
-    /// CHECK: This is the authority of the user profile
+    /// CHECK: Must match user_profile.authority (validated by has_one)
     pub authority: AccountInfo<'info>,
-    
+    pub system_program: Program<'info, System>,
+}
+
+// FIX #1: FollowUser now requires authority ownership + uses PDA for dedup
+#[derive(Accounts)]
+pub struct FollowUser<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::Unauthorized
+    )]
+    pub follower_profile: Account<'info, UserProfile>,
+    #[account(mut)]
+    pub target_profile: Account<'info, UserProfile>,
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + 32 + 32 + 8 + 1,
+        seeds = [b"follow", follower_profile.key().as_ref(), target_profile.key().as_ref()],
+        bump
+    )]
+    pub follow_record: Account<'info, FollowRecord>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct FollowUser<'info> {
-    #[account(mut)]
+pub struct UnfollowUser<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::Unauthorized
+    )]
     pub follower_profile: Account<'info, UserProfile>,
-    
     #[account(mut)]
     pub target_profile: Account<'info, UserProfile>,
-    
+    #[account(
+        mut,
+        seeds = [b"follow", follower_profile.key().as_ref(), target_profile.key().as_ref()],
+        bump = follow_record.bump,
+        close = authority
+    )]
+    pub follow_record: Account<'info, FollowRecord>,
+    #[account(mut)]
     pub authority: Signer<'info>,
 }
 
+// FIX #1: LikePost now uses PDA for dedup
 #[derive(Accounts)]
 pub struct LikePost<'info> {
     #[account(mut)]
     pub post: Account<'info, Post>,
-    
+    #[account(
+        init,
+        payer = user,
+        space = 8 + 32 + 32 + 8 + 1,
+        seeds = [b"like", post.key().as_ref(), user.key().as_ref()],
+        bump
+    )]
+    pub like_record: Account<'info, LikeRecord>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UnlikePost<'info> {
+    #[account(mut)]
+    pub post: Account<'info, Post>,
+    #[account(
+        mut,
+        seeds = [b"like", post.key().as_ref(), user.key().as_ref()],
+        bump = like_record.bump,
+        close = user
+    )]
+    pub like_record: Account<'info, LikeRecord>,
+    #[account(mut)]
     pub user: Signer<'info>,
 }
 
 #[derive(Accounts)]
 pub struct UpdateProfile<'info> {
-    #[account(mut, has_one = authority)]
+    #[account(mut, has_one = authority @ ErrorCode::Unauthorized)]
     pub user_profile: Account<'info, UserProfile>,
-    
     pub authority: Signer<'info>,
 }
 
@@ -217,10 +331,14 @@ pub struct UpdateProfile<'info> {
 pub enum ErrorCode {
     #[msg("Username is too long (max 32 characters)")]
     UsernameTooLong,
-    
     #[msg("Profile URI is too long (max 200 characters)")]
     ProfileUriTooLong,
-    
     #[msg("Invalid Arweave transaction ID (must be 43 characters)")]
     InvalidArweaveId,
+    #[msg("Unauthorized")]
+    Unauthorized,
+    #[msg("Cannot follow yourself")]
+    CannotFollowSelf,
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }

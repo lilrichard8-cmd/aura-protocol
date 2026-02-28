@@ -77,6 +77,7 @@ pub mod aura_curation {
     }
 
     /// Claim curation rewards
+    /// FIX #7: Added actual SOL transfer from reward vault to curator
     pub fn claim_curation_reward(ctx: Context<ClaimCurationReward>) -> Result<()> {
         let pool = &ctx.accounts.curation_pool;
         let record = &mut ctx.accounts.curation_record;
@@ -85,16 +86,21 @@ pub mod aura_curation {
         require!(pool.total_weight > 0, ErrorCode::NoWeightInPool);
         require!(record.reward_claimed == 0, ErrorCode::AlreadyClaimed);
 
-        // Calculate reward share: (curator_weight / total_weight) * total_pool
         let reward_amount = (record.curation_weight as u128)
             .checked_mul(pool.total_pool as u128)
-            .unwrap()
+            .ok_or(ErrorCode::NoRewardsAvailable)?
             .checked_div(pool.total_weight as u128)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::NoWeightInPool)? as u64;
 
         require!(reward_amount > 0, ErrorCode::NoRewardsAvailable);
 
-        // Mark as claimed
+        // Actual SOL transfer from reward vault to curator
+        let vault_lamports = ctx.accounts.reward_vault.lamports();
+        require!(vault_lamports >= reward_amount, ErrorCode::NoRewardsAvailable);
+
+        **ctx.accounts.reward_vault.to_account_info().try_borrow_mut_lamports()? -= reward_amount;
+        **ctx.accounts.curator.to_account_info().try_borrow_mut_lamports()? += reward_amount;
+
         record.reward_claimed = reward_amount;
 
         msg!(
@@ -266,6 +272,14 @@ pub struct ClaimCurationReward<'info> {
     
     /// CHECK: Content account
     pub content: AccountInfo<'info>,
+
+    /// CHECK: Reward vault PDA holding SOL
+    #[account(
+        mut,
+        seeds = [b"reward_vault", content.key().as_ref()],
+        bump
+    )]
+    pub reward_vault: AccountInfo<'info>,
     
     #[account(mut)]
     pub curator: Signer<'info>,
