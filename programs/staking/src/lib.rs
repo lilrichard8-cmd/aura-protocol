@@ -32,6 +32,7 @@ pub mod aura_staking {
         ctx: Context<StakeOra>,
         amount: u64,
         lockup_tier: LockupTier,
+        stake_nonce: u64,
     ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
@@ -53,6 +54,7 @@ pub mod aura_staking {
 
         let stake = &mut ctx.accounts.stake_account;
         stake.owner = ctx.accounts.user.key();
+        stake.stake_nonce = stake_nonce;
         stake.amount = amount;
         stake.lockup_tier = lockup_tier;
         stake.staked_at = now;
@@ -77,8 +79,8 @@ pub mod aura_staking {
             .unwrap() as u64;
 
         let pool = &mut ctx.accounts.staking_pool;
-        pool.total_staked = pool.total_staked.checked_add(amount).unwrap();
-        pool.total_weighted_stake = pool.total_weighted_stake.checked_add(weighted).unwrap();
+        pool.total_staked = pool.total_staked.checked_add(amount).ok_or(ErrorCode::Overflow)?;
+        pool.total_weighted_stake = pool.total_weighted_stake.checked_add(weighted).ok_or(ErrorCode::Overflow)?;
 
         msg!("Staked {} ORA with {:?} lockup (multiplier {}bps)", amount, stake.lockup_tier, multiplier_bps);
         Ok(())
@@ -174,8 +176,8 @@ pub mod aura_staking {
         )?;
 
         let stake_mut = &mut ctx.accounts.stake_account;
-        stake_mut.reward_debt = stake_mut.reward_debt.checked_add(pending).unwrap();
-        stake_mut.claimed_rewards = stake_mut.claimed_rewards.checked_add(pending).unwrap();
+        stake_mut.reward_debt = stake_mut.reward_debt.checked_add(pending).ok_or(ErrorCode::Overflow)?;
+        stake_mut.claimed_rewards = stake_mut.claimed_rewards.checked_add(pending).ok_or(ErrorCode::Overflow)?;
 
         msg!("Claimed {} ORA staking rewards", pending);
         Ok(())
@@ -215,8 +217,8 @@ pub mod aura_staking {
             pool.accumulated_reward_per_weight = pool
                 .accumulated_reward_per_weight
                 .checked_add(reward_per_weight)
-                .unwrap();
-            pool.reward_pool_balance = pool.reward_pool_balance.checked_add(reward_amount).unwrap();
+                .ok_or(ErrorCode::Overflow)?;
+            pool.reward_pool_balance = pool.reward_pool_balance.checked_add(reward_amount).ok_or(ErrorCode::Overflow)?;
         }
 
         pool.last_daily_update = now;

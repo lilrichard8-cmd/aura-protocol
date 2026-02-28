@@ -587,6 +587,11 @@ pub enum ErrorCode {
     InvalidAmount,
     #[msg("MAU has not increased")]
     MauNotIncreased,
+    #[msg("Unauthorized")]
+    Unauthorized,
     #[msg("MAU growth mint cap reached")]
     MauGrowthCapReached,
+
+    #[msg("Unauthorized")]
+    Unauthorized,
 }

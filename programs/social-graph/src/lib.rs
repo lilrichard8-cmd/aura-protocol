@@ -51,7 +51,7 @@ pub mod aura_social_graph {
 
         // Increment the target creator's follower count
         let target_graph = &mut ctx.accounts.target_social_graph_nft;
-        target_graph.followers_count = target_graph.followers_count.checked_add(1).unwrap();
+        target_graph.followers_count = target_graph.followers_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "User {} now following creator {} (total: {})",
@@ -77,7 +77,7 @@ pub mod aura_social_graph {
 
         // Decrement the target creator's follower count
         let target_graph = &mut ctx.accounts.target_social_graph_nft;
-        target_graph.followers_count = target_graph.followers_count.checked_sub(1).unwrap();
+        target_graph.followers_count = target_graph.followers_count.checked_sub(1).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "User {} unfollowed creator {} (remaining: {})",

@@ -80,7 +80,7 @@ pub mod aura_creator_coin {
             .checked_div(10000)
             .unwrap() as u64;
 
-        let reserve_amount = total_cost.checked_sub(creator_fee).unwrap();
+        let reserve_amount = total_cost.checked_sub(creator_fee).ok_or(ErrorCode::Overflow)?;
 
         // Transfer SOL from buyer to reserve vault
         let transfer_ix = anchor_lang::solana_program::system_instruction::transfer(
@@ -136,9 +136,9 @@ pub mod aura_creator_coin {
         )?;
 
         // Update state
-        creator_coin.total_supply = creator_coin.total_supply.checked_add(amount).unwrap();
-        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_add(reserve_amount).unwrap();
-        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).unwrap();
+        creator_coin.total_supply = creator_coin.total_supply.checked_add(amount).ok_or(ErrorCode::Overflow)?;
+        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_add(reserve_amount).ok_or(ErrorCode::Overflow)?;
+        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "Bought {} {} tokens for {} lamports (fee: {})",
@@ -160,7 +160,7 @@ pub mod aura_creator_coin {
         require!(current_supply >= amount, ErrorCode::InsufficientSupply);
 
         // Calculate sell price using bonding curve (always slightly less than buy price)
-        let new_supply = current_supply.checked_sub(amount).unwrap();
+        let new_supply = current_supply.checked_sub(amount).ok_or(ErrorCode::Overflow)?;
         let total_return = calculate_buy_price(
             new_supply,
             amount,
@@ -178,7 +178,7 @@ pub mod aura_creator_coin {
             .checked_div(10000)
             .unwrap() as u64;
 
-        let seller_return = total_return.checked_sub(creator_fee).unwrap();
+        let seller_return = total_return.checked_sub(creator_fee).ok_or(ErrorCode::Overflow)?;
 
         // Burn creator coins from seller
         token::burn(
@@ -211,9 +211,9 @@ pub mod aura_creator_coin {
         }
 
         // Update state
-        creator_coin.total_supply = creator_coin.total_supply.checked_sub(amount).unwrap();
-        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_sub(total_return).unwrap();
-        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).unwrap();
+        creator_coin.total_supply = creator_coin.total_supply.checked_sub(amount).ok_or(ErrorCode::Overflow)?;
+        creator_coin.reserve_balance = creator_coin.reserve_balance.checked_sub(total_return).ok_or(ErrorCode::Overflow)?;
+        creator_coin.total_fees_collected = creator_coin.total_fees_collected.checked_add(creator_fee).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "Sold {} {} tokens for {} lamports (fee: {})",
@@ -254,7 +254,7 @@ fn calculate_buy_price(
     // For Price = k * Supply^n, the integral is:
     // ∫ k * x^n dx = k * x^(n+1) / (n+1)
     
-    let n_plus_1 = n_u128.checked_add(1).unwrap();
+    let n_plus_1 = n_u128.checked_add(1).ok_or(ErrorCode::Overflow)?;
     
     // Calculate for supply + amount
     let end_supply = supply_u128.checked_add(amount_u128).unwrap();

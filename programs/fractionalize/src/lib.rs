@@ -804,4 +804,8 @@ pub enum ErrorCode {
 
     #[msg("Invalid holder")]
     InvalidHolder,
+
+
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }

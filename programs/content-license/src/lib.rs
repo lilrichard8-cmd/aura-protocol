@@ -217,7 +217,7 @@ pub mod aura_content_license {
             .checked_div(10000)
             .unwrap() as u64;
 
-        let remixer_amount = amount.checked_sub(royalty_amount).unwrap();
+        let remixer_amount = amount.checked_sub(royalty_amount).ok_or(ErrorCode::Overflow)?;
 
         // Transfer royalty to original creator
         if royalty_amount > 0 {
@@ -470,8 +470,14 @@ pub enum ErrorCode {
     #[msg("Remix/derivatives not allowed for this content")]
     RemixNotAllowed,
 
+    #[msg("Invalid creator account")]
+    InvalidCreator,
+
     #[msg("License is not active")]
     LicenseNotActive,
+
+    #[msg("Arithmetic overflow")]
+    Overflow,
 
     #[msg("Creator does not match license")]
     InvalidCreator,

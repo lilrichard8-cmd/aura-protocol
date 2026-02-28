@@ -9,7 +9,7 @@ pub mod aura_vault {
     /// Initialize vault config (sets arbitration authority)
     pub fn initialize_vault_config(ctx: Context<InitializeVaultConfig>) -> Result<()> {
         let config = &mut ctx.accounts.vault_config;
-        config.arbitration_authority = ctx.accounts.authority.key();
+        config.arbitration_authority = ctx.accounts.admin.key();
         config.bump = ctx.bumps.vault_config;
         msg!("Vault config initialized");
         Ok(())
@@ -66,7 +66,7 @@ pub mod aura_vault {
         Ok(())
     }
 
-    /// FIX #5: Freeze vault - requires verified arbitration authority
+    /// FIX #5: Freeze vault — requires validated arbitration authority
     pub fn freeze_vault(ctx: Context<ArbitrationAction>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         vault.is_frozen = true;
@@ -113,10 +113,10 @@ pub enum SpendPurpose { MintNFT, AdBid, Boost, Other }
 
 #[derive(Accounts)]
 pub struct InitializeVaultConfig<'info> {
-    #[account(init, payer = authority, space = 8 + 32 + 1, seeds = [b"vault_config"], bump)]
+    #[account(init, payer = admin, space = 8 + 32 + 1, seeds = [b"vault_config"], bump)]
     pub vault_config: Account<'info, VaultConfig>,
     #[account(mut)]
-    pub authority: Signer<'info>,
+    pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -151,7 +151,7 @@ pub struct ClaimVested<'info> {
     pub owner: Signer<'info>,
 }
 
-// FIX #5: ArbitrationAction validates authority against VaultConfig
+// FIX #5: ArbitrationAction now validates authority via VaultConfig
 #[derive(Accounts)]
 pub struct ArbitrationAction<'info> {
     #[account(mut)]
@@ -159,7 +159,7 @@ pub struct ArbitrationAction<'info> {
     #[account(
         seeds = [b"vault_config"],
         bump = vault_config.bump,
-        has_one = arbitration_authority @ ErrorCode::Unauthorized
+        constraint = vault_config.arbitration_authority == arbitration_authority.key() @ ErrorCode::Unauthorized
     )]
     pub vault_config: Account<'info, VaultConfig>,
     pub arbitration_authority: Signer<'info>,
@@ -172,7 +172,7 @@ pub struct SeizeFunds<'info> {
     #[account(
         seeds = [b"vault_config"],
         bump = vault_config.bump,
-        has_one = arbitration_authority @ ErrorCode::Unauthorized
+        constraint = vault_config.arbitration_authority == arbitration_authority.key() @ ErrorCode::Unauthorized
     )]
     pub vault_config: Account<'info, VaultConfig>,
     pub arbitration_authority: Signer<'info>,

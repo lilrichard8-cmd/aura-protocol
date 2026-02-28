@@ -16,6 +16,7 @@ pub mod aura_type_b {
         ctx: Context<TypeBPayment>,
         amount: u64,
         content_id: [u8; 32],
+        nonce: u64,
     ) -> Result<()> {
         process_type_b_payment(&ctx, amount)?;
 
@@ -38,6 +39,7 @@ pub mod aura_type_b {
         ctx: Context<TypeBPayment>,
         amount: u64,
         content_id: [u8; 32],
+        nonce: u64,
     ) -> Result<()> {
         process_type_b_payment(&ctx, amount)?;
 
@@ -60,6 +62,7 @@ pub mod aura_type_b {
         ctx: Context<TypeBPayment>,
         amount: u64,
         content_id: [u8; 32],
+        nonce: u64,
     ) -> Result<()> {
         process_type_b_payment(&ctx, amount)?;
 
@@ -82,6 +85,7 @@ pub mod aura_type_b {
         ctx: Context<TypeBPayment>,
         amount: u64,
         content_id: [u8; 32],
+        nonce: u64,
     ) -> Result<()> {
         process_type_b_payment(&ctx, amount)?;
 

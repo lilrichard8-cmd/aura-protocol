@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program;
 
 declare_id!("CurationProgram111111111111111111111111111111");
 
@@ -47,12 +48,12 @@ pub mod aura_curation {
         record.bump = ctx.bumps.curation_record;
 
         // Update pool statistics
-        pool.total_weight = pool.total_weight.checked_add(curation_weight).unwrap();
-        pool.curators_count = pool.curators_count.checked_add(1).unwrap();
+        pool.total_weight = pool.total_weight.checked_add(curation_weight).ok_or(ErrorCode::Overflow)?;
+        pool.curators_count = pool.curators_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         // Increment content likes
         let content = &mut ctx.accounts.content;
-        content.likes = content.likes.checked_add(1).unwrap();
+        content.likes = content.likes.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "Content curated by {} with weight {} (time delta: {}s)",
@@ -70,7 +71,7 @@ pub mod aura_curation {
         require!(!pool.is_settled, ErrorCode::PoolAlreadySettled);
         require!(amount > 0, ErrorCode::InvalidAmount);
 
-        pool.total_pool = pool.total_pool.checked_add(amount).unwrap();
+        pool.total_pool = pool.total_pool.checked_add(amount).ok_or(ErrorCode::Overflow)?;
 
         msg!("Deposited {} tokens to curation pool", amount);
         Ok(())

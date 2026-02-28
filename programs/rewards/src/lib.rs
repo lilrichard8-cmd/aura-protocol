@@ -83,7 +83,7 @@ pub mod aura_rewards {
             .unwrap()
             .checked_div(10000)
             .unwrap() as u64;
-        let net_reward = phase_reward.checked_sub(burn_amount).unwrap();
+        let net_reward = phase_reward.checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?;
 
         let seeds = &[b"reward_state".as_ref(), &[bump]];
         let signer = &[&seeds[..]];
@@ -104,8 +104,8 @@ pub mod aura_rewards {
         }
 
         let state = &mut ctx.accounts.reward_state;
-        state.total_distributed = state.total_distributed.checked_add(net_reward).unwrap();
-        state.total_burned = state.total_burned.checked_add(burn_amount).unwrap();
+        state.total_distributed = state.total_distributed.checked_add(net_reward).ok_or(ErrorCode::Overflow)?;
+        state.total_burned = state.total_burned.checked_add(burn_amount).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "Creation reward: {} ORA (tier {:?}, burned {}, MAU {})",
@@ -148,7 +148,7 @@ pub mod aura_rewards {
             .unwrap()
             .checked_div(10000)
             .unwrap() as u64;
-        let net_reward = phase_reward.checked_sub(burn_amount).unwrap();
+        let net_reward = phase_reward.checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?;
 
         let seeds = &[b"reward_state".as_ref(), &[bump]];
         let signer = &[&seeds[..]];
@@ -169,8 +169,8 @@ pub mod aura_rewards {
         }
 
         let state = &mut ctx.accounts.reward_state;
-        state.total_distributed = state.total_distributed.checked_add(net_reward).unwrap();
-        state.total_burned = state.total_burned.checked_add(burn_amount).unwrap();
+        state.total_distributed = state.total_distributed.checked_add(net_reward).ok_or(ErrorCode::Overflow)?;
+        state.total_burned = state.total_burned.checked_add(burn_amount).ok_or(ErrorCode::Overflow)?;
 
         msg!(
             "Curation reward: {} ORA (weight {}/{}, burned {})",
@@ -347,4 +347,6 @@ pub enum ErrorCode {
     InvalidWeight,
     #[msg("Reward pool exhausted")]
     PoolExhausted,
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }

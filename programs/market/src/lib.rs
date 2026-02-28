@@ -79,7 +79,7 @@ pub mod aura_market {
             ErrorCode::BountyExpired
         );
 
-        bounty.submission_count = bounty.submission_count.checked_add(1).unwrap();
+        bounty.submission_count = bounty.submission_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         msg!("Bounty submission received");
         Ok(())

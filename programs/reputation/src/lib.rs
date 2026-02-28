@@ -287,4 +287,8 @@ pub enum ErrorCode {
     
     #[msg("Reputation tier calculation failed")]
     TierCalculationFailed,
+
+
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }
