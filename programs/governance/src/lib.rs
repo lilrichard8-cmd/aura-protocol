@@ -1,20 +1,18 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::TokenAccount as SplTokenAccount;
 
-declare_id!("GovernanceProgram111111111111111111111111111");
+pub mod arbitration;
+pub use arbitration::*;
 
-/// Square root voting: vote_weight = √(ORA balance), capped at 10,000
+declare_id!("7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk");
+
 const MAX_VOTE_WEIGHT: u64 = 10_000;
 
-/// Integer square root (Newton's method)
 fn isqrt(n: u64) -> u64 {
     if n == 0 { return 0; }
     let mut x = n;
     let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
+    while y < x { x = y; y = (x + n / x) / 2; }
     x
 }
 
@@ -22,394 +20,422 @@ fn isqrt(n: u64) -> u64 {
 pub mod aura_governance {
     use super::*;
 
-    /// Initialize governance config (sets admin who can register arbiters)
     pub fn initialize_governance(ctx: Context<InitializeGovernance>) -> Result<()> {
         let config = &mut ctx.accounts.governance_config;
         config.admin = ctx.accounts.admin.key();
         config.proposal_count = 0;
         config.bump = ctx.bumps.governance_config;
-        msg!("Governance initialized");
         Ok(())
     }
 
-    /// Register an arbiter (admin only)
     pub fn register_arbiter(ctx: Context<RegisterArbiter>) -> Result<()> {
-        let arbiter_record = &mut ctx.accounts.arbiter_record;
-        arbiter_record.arbiter = ctx.accounts.arbiter.key();
-        arbiter_record.registered_at = Clock::get()?.unix_timestamp;
-        arbiter_record.is_active = true;
-        arbiter_record.bump = ctx.bumps.arbiter_record;
-        msg!("Arbiter registered: {}", arbiter_record.arbiter);
+        let r = &mut ctx.accounts.arbiter_record;
+        r.arbiter = ctx.accounts.arbiter.key();
+        r.registered_at = Clock::get()?.unix_timestamp;
+        r.is_active = true;
+        r.bump = ctx.bumps.arbiter_record;
         Ok(())
     }
 
-    /// Create a new proposal
-    pub fn create_proposal(
-        ctx: Context<CreateProposal>,
-        title: String,
-        description: String,
-        committee_type: CommitteeType,
-        proposal_type: ProposalType,
-    ) -> Result<()> {
+    pub fn create_proposal(ctx: Context<CreateProposal>, title: String, description: String, committee_type: CommitteeType, proposal_type: ProposalType) -> Result<()> {
         require!(title.len() <= 100, ErrorCode::TitleTooLong);
         require!(description.len() <= 5000, ErrorCode::DescriptionTooLong);
-
-        let proposal = &mut ctx.accounts.proposal;
+        let p = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
-        
-        proposal.proposer = ctx.accounts.proposer.key();
-        proposal.title = title;
-        proposal.description = description;
-        proposal.committee_type = committee_type;
-        proposal.proposal_type = proposal_type;
-        proposal.status = ProposalStatus::Voting;
-        proposal.votes_for = 0;
-        proposal.votes_against = 0;
-        proposal.total_votes = 0;
-        proposal.created_at = clock.unix_timestamp;
-        proposal.voting_ends_at = clock.unix_timestamp + (7 * 24 * 60 * 60);
-        proposal.bump = ctx.bumps.proposal;
-
-        msg!("Proposal created: {}", proposal.title);
+        p.proposer = ctx.accounts.proposer.key(); p.title = title; p.description = description;
+        p.committee_type = committee_type; p.proposal_type = proposal_type;
+        p.status = ProposalStatus::Voting; p.votes_for = 0; p.votes_against = 0; p.total_votes = 0;
+        p.created_at = clock.unix_timestamp; p.voting_ends_at = clock.unix_timestamp + 604800;
+        p.bump = ctx.bumps.proposal;
         Ok(())
     }
 
-    /// Vote on a proposal
-    /// FIX #3: Added VoteRecord PDA to prevent duplicate votes
-    /// Vote on proposal with √ORA voting power, capped at 10,000
-    pub fn vote_on_proposal(
-        ctx: Context<VoteOnProposal>,
-        vote_for: bool,
-    ) -> Result<()> {
+    pub fn vote_on_proposal(ctx: Context<VoteOnProposal>, vote_for: bool) -> Result<()> {
         let proposal = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
-
         require!(proposal.status == ProposalStatus::Voting, ErrorCode::ProposalNotVoting);
         require!(clock.unix_timestamp < proposal.voting_ends_at, ErrorCode::VotingEnded);
-
-        // Calculate vote weight: √(ORA token balance), capped at 10,000
         let ora_balance = ctx.accounts.voter_ora_account.amount;
         require!(ora_balance > 0, ErrorCode::InvalidVoteWeight);
-
-        // ORA has 9 decimals, so divide first to get whole tokens
-        let whole_tokens = ora_balance / 1_000_000_000;
-        let sqrt_weight = isqrt(whole_tokens);
-        let vote_weight = sqrt_weight.min(MAX_VOTE_WEIGHT);
+        let vote_weight = isqrt(ora_balance / 1_000_000_000).min(MAX_VOTE_WEIGHT);
         require!(vote_weight > 0, ErrorCode::InvalidVoteWeight);
-
-        let vote_record = &mut ctx.accounts.vote_record;
-        vote_record.voter = ctx.accounts.voter.key();
-        vote_record.proposal = ctx.accounts.proposal.key();
-        vote_record.vote_for = vote_for;
-        vote_record.vote_weight = vote_weight;
-        vote_record.voted_at = clock.unix_timestamp;
-        vote_record.bump = ctx.bumps.vote_record;
-
-        if vote_for {
-            proposal.votes_for = proposal.votes_for.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?;
-        } else {
-            proposal.votes_against = proposal.votes_against.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?;
-        }
+        let vr = &mut ctx.accounts.vote_record;
+        vr.voter = ctx.accounts.voter.key(); vr.proposal = ctx.accounts.proposal.key();
+        vr.vote_for = vote_for; vr.vote_weight = vote_weight;
+        vr.voted_at = clock.unix_timestamp; vr.bump = ctx.bumps.vote_record;
+        if vote_for { proposal.votes_for = proposal.votes_for.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?; }
+        else { proposal.votes_against = proposal.votes_against.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?; }
         proposal.total_votes = proposal.total_votes.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?;
-
-        msg!("Voted with √ORA weight: {} (balance: {} ORA)", vote_weight, whole_tokens);
         Ok(())
     }
 
-    /// Execute a passed proposal
     pub fn execute_proposal(ctx: Context<ExecuteProposal>) -> Result<()> {
         let proposal = &mut ctx.accounts.proposal;
-        let clock = Clock::get()?;
-
-        require!(clock.unix_timestamp >= proposal.voting_ends_at, ErrorCode::VotingNotEnded);
+        require!(Clock::get()?.unix_timestamp >= proposal.voting_ends_at, ErrorCode::VotingNotEnded);
         require!(proposal.status == ProposalStatus::Voting, ErrorCode::InvalidProposalStatus);
-
-        if proposal.votes_for > proposal.votes_against {
-            proposal.status = ProposalStatus::Passed;
-            msg!("Proposal passed and executed");
-        } else {
-            proposal.status = ProposalStatus::Failed;
-            msg!("Proposal failed");
-        }
-
+        proposal.status = if proposal.votes_for > proposal.votes_against { ProposalStatus::Passed } else { ProposalStatus::Failed };
         Ok(())
     }
 
-    /// Create a dispute
-    pub fn create_dispute(
-        ctx: Context<CreateDispute>,
-        evidence_uri: String,
-        dispute_type: DisputeType,
-    ) -> Result<()> {
+    pub fn create_dispute(ctx: Context<CreateDispute>, evidence_uri: String, dispute_type: DisputeType) -> Result<()> {
         require!(evidence_uri.len() <= 200, ErrorCode::EvidenceUriTooLong);
-
-        let dispute = &mut ctx.accounts.dispute;
-        dispute.plaintiff = ctx.accounts.plaintiff.key();
-        dispute.target_user = ctx.accounts.target_user.key();
-        dispute.evidence_uri = evidence_uri;
-        dispute.dispute_type = dispute_type;
-        dispute.status = DisputeStatus::UnderReview;
-        dispute.votes_guilty = 0;
-        dispute.votes_innocent = 0;
-        dispute.created_at = Clock::get()?.unix_timestamp;
-        dispute.bump = ctx.bumps.dispute;
-
-        msg!("Dispute created");
+        let d = &mut ctx.accounts.dispute;
+        d.plaintiff = ctx.accounts.plaintiff.key(); d.target_user = ctx.accounts.target_user.key();
+        d.evidence_uri = evidence_uri; d.dispute_type = dispute_type;
+        d.status = OldDisputeStatus::UnderReview; d.votes_guilty = 0; d.votes_innocent = 0;
+        d.created_at = Clock::get()?.unix_timestamp; d.bump = ctx.bumps.dispute;
         Ok(())
     }
 
-    /// Vote on dispute (verified arbitration committee member only)
-    /// FIX #4: Added arbiter_record verification + dispute vote dedup
-    pub fn vote_on_dispute(
-        ctx: Context<VoteOnDispute>,
-        vote_guilty: bool,
-    ) -> Result<()> {
+    pub fn vote_on_dispute(ctx: Context<VoteOnDispute>, vote_guilty: bool) -> Result<()> {
         let dispute = &mut ctx.accounts.dispute;
-        require!(dispute.status == DisputeStatus::UnderReview, ErrorCode::DisputeAlreadyResolved);
+        require!(dispute.status == OldDisputeStatus::UnderReview, ErrorCode::DisputeAlreadyResolved);
         require!(ctx.accounts.arbiter_record.is_active, ErrorCode::ArbiterNotActive);
-
-        // Record vote
-        let dispute_vote = &mut ctx.accounts.dispute_vote;
-        dispute_vote.arbiter = ctx.accounts.arbiter.key();
-        dispute_vote.dispute = ctx.accounts.dispute.key();
-        dispute_vote.vote_guilty = vote_guilty;
-        dispute_vote.voted_at = Clock::get()?.unix_timestamp;
-        dispute_vote.bump = ctx.bumps.dispute_vote;
-
-        if vote_guilty {
-            dispute.votes_guilty = dispute.votes_guilty.checked_add(1).ok_or(ErrorCode::Overflow)?;
-        } else {
-            dispute.votes_innocent = dispute.votes_innocent.checked_add(1).ok_or(ErrorCode::Overflow)?;
+        let dv = &mut ctx.accounts.dispute_vote;
+        dv.arbiter = ctx.accounts.arbiter.key(); dv.dispute = ctx.accounts.dispute.key();
+        dv.vote_guilty = vote_guilty; dv.voted_at = Clock::get()?.unix_timestamp; dv.bump = ctx.bumps.dispute_vote;
+        if vote_guilty { dispute.votes_guilty += 1; } else { dispute.votes_innocent += 1; }
+        if (dispute.votes_guilty + dispute.votes_innocent) >= 4 {
+            dispute.status = if dispute.votes_guilty > dispute.votes_innocent { OldDisputeStatus::Guilty } else { OldDisputeStatus::Innocent };
         }
+        Ok(())
+    }
 
-        // Auto-resolve at 4/7 votes
-        let total_votes = dispute.votes_guilty + dispute.votes_innocent;
-        if total_votes >= 4 {
-            if dispute.votes_guilty > dispute.votes_innocent {
-                dispute.status = DisputeStatus::Guilty;
-            } else {
-                dispute.status = DisputeStatus::Innocent;
+    // ===== Arbitration (Task #8) =====
+
+    pub fn init_arbitration_governance(ctx: Context<InitArbitrationGovernanceCtx>, core_team_multisig: Pubkey) -> Result<()> {
+        let ag = &mut ctx.accounts.arbitration_governance;
+        ag.phase = ArbitrationPhase::Year1Bootstrap; ag.core_team_multisig = core_team_multisig;
+        ag.transition_at_slot = 0; ag.dispute_count = 0; ag.bump = ctx.bumps.arbitration_governance;
+        Ok(())
+    }
+
+    pub fn init_arbitrator_registry(ctx: Context<InitArbitratorRegistryCtx>) -> Result<()> {
+        let reg = &mut ctx.accounts.arbitrator_registry;
+        reg.arbitrators = Vec::new(); reg.total_pool_size = 0; reg.bump = ctx.bumps.arbitrator_registry;
+        Ok(())
+    }
+
+    pub fn register_as_arbitrator(ctx: Context<RegisterAsArbitratorCtx>) -> Result<()> {
+        let reg = &mut ctx.accounts.arbitrator_registry;
+        let user_key = ctx.accounts.user.key();
+        require!(!reg.arbitrators.iter().any(|a| a.user == user_key), ArbitrationError::AlreadyRegistered);
+        require!(reg.arbitrators.len() < MAX_ARBITRATORS, ArbitrationError::RegistryFull);
+        let stake = ctx.accounts.user_ora_account.amount;
+        require!(stake >= MIN_STAKE_LAMPORTS, ArbitrationError::InsufficientStake);
+        let slot = Clock::get()?.slot;
+        reg.arbitrators.push(Arbitrator { user: user_key, ars: 0, staked_ora_lamports: stake, joined_at_slot: slot, is_in_other_committee: false, last_penalty_slot: None, excluded_until_slot: None });
+        reg.total_pool_size += 1;
+        emit!(ArbitratorRegistered { user: user_key, slot });
+        Ok(())
+    }
+
+    pub fn file_arbitration_dispute(ctx: Context<FileArbitrationDisputeCtx>, redemption_id: u64, coin_mint: Pubkey, defendant: Pubkey) -> Result<()> {
+        let ag = &mut ctx.accounts.arbitration_governance;
+        let id = ag.dispute_count;
+        ag.dispute_count = id.checked_add(1).ok_or(ArbitrationError::Overflow)?;
+        let slot = Clock::get()?.slot;
+        let d = &mut ctx.accounts.arb_dispute;
+        d.id = id; d.redemption_id = redemption_id; d.coin_mint = coin_mint;
+        d.plaintiff = ctx.accounts.plaintiff.key(); d.defendant = defendant;
+        d.filed_at_slot = slot; d.status = DisputeStatus::Filed;
+        d.trial1_jury = [Pubkey::default(); 5]; d.trial1_rulings = Vec::new();
+        d.trial1_deadline_slot = 0; d.trial1_outcome = None; d.trial1_concluded_at_slot = None;
+        d.trial2_panel = None; d.trial2_rulings = Vec::new();
+        d.trial2_deadline_slot = None; d.trial2_outcome = None;
+        d.appeal_deadline_slot = None; d.bump = ctx.bumps.arb_dispute;
+        emit!(DisputeFiled { id, redemption_id, plaintiff: d.plaintiff, slot });
+        Ok(())
+    }
+
+    pub fn select_trial1_jury(ctx: Context<SelectTrial1JuryCtx>, dispute_id: u64) -> Result<()> {
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Filed, ArbitrationError::InvalidDisputeStatus);
+        let reg = &ctx.accounts.arbitrator_registry;
+        let slot = Clock::get()?.slot;
+        // TODO: Replace pseudo-random with Switchboard/ORAO VRF
+        let eligible: Vec<usize> = reg.arbitrators.iter().enumerate()
+            .filter(|(_, a)| a.user != d.plaintiff && a.user != d.defendant && a.excluded_until_slot.map_or(true, |ex| slot > ex) && !a.is_in_other_committee)
+            .map(|(i, _)| i).collect();
+        require!(eligible.len() >= TRIAL1_JURY_SIZE, ArbitrationError::InsufficientArbitrators);
+        let mut selected = [Pubkey::default(); 5];
+        let mut used: Vec<usize> = Vec::new();
+        for i in 0..TRIAL1_JURY_SIZE {
+            let seed = slot.wrapping_add(i as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let mut pick = eligible[(seed as usize) % eligible.len()];
+            let mut att = 0;
+            while used.contains(&pick) && att < eligible.len() { att += 1; pick = eligible[(seed.wrapping_add(att as u64).wrapping_mul(6364136223846793005) as usize) % eligible.len()]; }
+            used.push(pick);
+            selected[i] = reg.arbitrators[pick].user;
+        }
+        d.trial1_jury = selected; d.trial1_deadline_slot = slot + TRIAL_DEADLINE_SLOTS;
+        d.status = DisputeStatus::Trial1JurySelected;
+        emit!(Trial1JurySelected { dispute_id: d.id, jury: selected, slot });
+        Ok(())
+    }
+
+    pub fn submit_trial1_ruling(ctx: Context<SubmitTrial1RulingCtx>, dispute_id: u64, vote: Ruling, reasoning_uri: String) -> Result<()> {
+        require!(reasoning_uri.len() <= 200, ArbitrationError::UriTooLong);
+        let juror_key = ctx.accounts.juror.key();
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Trial1JurySelected || d.status == DisputeStatus::Trial1Pending, ArbitrationError::InvalidDisputeStatus);
+        require!(d.trial1_jury.contains(&juror_key), ArbitrationError::NotAJuror);
+        require!(!d.trial1_rulings.iter().any(|r| r.juror == juror_key), ArbitrationError::AlreadyRuled);
+        let slot = Clock::get()?.slot;
+        d.trial1_rulings.push(JurorRuling { juror: juror_key, vote, reasoning_uri, submitted_at_slot: slot });
+        d.status = DisputeStatus::Trial1Pending;
+        emit!(Trial1RulingSubmitted { dispute_id: d.id, juror: juror_key, slot });
+        Ok(())
+    }
+
+    pub fn finalize_trial1(ctx: Context<FinalizeTrial1Ctx>, dispute_id: u64) -> Result<()> {
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Trial1Pending, ArbitrationError::InvalidDisputeStatus);
+        let slot = Clock::get()?.slot;
+        require!(d.trial1_rulings.len() >= TRIAL1_JURY_SIZE || slot >= d.trial1_deadline_slot, ArbitrationError::TrialNotDeadlined);
+        let (mut rc, mut rf) = (0u32, 0u32);
+        for r in &d.trial1_rulings { match &r.vote { Ruling::ReleaseToCreator => rc += 1, Ruling::RefundBuyer => rf += 1, _ => {} } }
+        let outcome = if rc > rf { Ruling::ReleaseToCreator } else { Ruling::RefundBuyer };
+        d.trial1_outcome = Some(outcome.clone()); d.trial1_concluded_at_slot = Some(slot);
+        d.appeal_deadline_slot = Some(slot + APPEAL_WINDOW_SLOTS); d.status = DisputeStatus::Trial1Concluded;
+        emit!(Trial1Finalized { dispute_id: d.id, outcome, slot });
+        Ok(())
+    }
+
+    pub fn appeal_to_trial2(ctx: Context<AppealToTrial2Ctx>, dispute_id: u64) -> Result<()> {
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Trial1Concluded, ArbitrationError::InvalidDisputeStatus);
+        let slot = Clock::get()?.slot;
+        let deadline = d.appeal_deadline_slot.ok_or(ArbitrationError::InvalidDisputeStatus)?;
+        require!(slot <= deadline, ArbitrationError::AppealWindowExpired);
+        // Status stays Trial1Concluded, select_trial2_panel will advance it
+        Ok(())
+    }
+
+    pub fn select_trial2_panel(ctx: Context<SelectTrial2PanelCtx>, dispute_id: u64) -> Result<()> {
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Trial1Concluded, ArbitrationError::InvalidDisputeStatus);
+        let reg = &ctx.accounts.arbitrator_registry;
+        let slot = Clock::get()?.slot;
+        let mut eligible: Vec<(usize, u64)> = reg.arbitrators.iter().enumerate()
+            .filter(|(_, a)| a.ars >= MIN_ARS_TRIAL2 && a.user != d.plaintiff && a.user != d.defendant && !d.trial1_jury.contains(&a.user) && a.excluded_until_slot.map_or(true, |ex| slot > ex) && !a.is_in_other_committee)
+            .map(|(i, a)| (i, a.ars)).collect();
+        eligible.sort_by(|a, b| b.1.cmp(&a.1));
+        require!(eligible.len() >= TRIAL2_PANEL_SIZE, ArbitrationError::InsufficientArbitrators);
+        let mut selected = [Pubkey::default(); 7];
+        for i in 0..TRIAL2_PANEL_SIZE { selected[i] = reg.arbitrators[eligible[i].0].user; }
+        d.trial2_panel = Some(selected); d.trial2_deadline_slot = Some(slot + TRIAL_DEADLINE_SLOTS);
+        d.status = DisputeStatus::Trial2PanelSelected;
+        emit!(Trial2PanelSelected { dispute_id: d.id, panel: selected, slot });
+        Ok(())
+    }
+
+    pub fn submit_trial2_ruling(ctx: Context<SubmitTrial2RulingCtx>, dispute_id: u64, vote: Ruling, reasoning_uri: String) -> Result<()> {
+        require!(reasoning_uri.len() <= 200, ArbitrationError::UriTooLong);
+        let juror_key = ctx.accounts.juror.key();
+        let d = &mut ctx.accounts.arb_dispute;
+        require!(d.status == DisputeStatus::Trial2PanelSelected || d.status == DisputeStatus::Trial2Pending, ArbitrationError::InvalidDisputeStatus);
+        let panel = d.trial2_panel.ok_or(ArbitrationError::InvalidDisputeStatus)?;
+        require!(panel.contains(&juror_key), ArbitrationError::NotAJuror);
+        require!(!d.trial2_rulings.iter().any(|r| r.juror == juror_key), ArbitrationError::AlreadyRuled);
+        let slot = Clock::get()?.slot;
+        d.trial2_rulings.push(JurorRuling { juror: juror_key, vote, reasoning_uri, submitted_at_slot: slot });
+        d.status = DisputeStatus::Trial2Pending;
+        Ok(())
+    }
+
+    pub fn finalize_dispute(ctx: Context<FinalizeDisputeCtx>, dispute_id: u64) -> Result<()> {
+        let d = &mut ctx.accounts.arb_dispute;
+        let slot = Clock::get()?.slot;
+        if d.status == DisputeStatus::Trial1Concluded {
+            let deadline = d.appeal_deadline_slot.ok_or(ArbitrationError::InvalidDisputeStatus)?;
+            require!(slot > deadline, ArbitrationError::AppealWindowNotExpired);
+            d.status = DisputeStatus::Resolved;
+            emit!(DisputeResolved { dispute_id: d.id, outcome: d.trial1_outcome.clone().unwrap_or(Ruling::RefundBuyer), slot });
+            return Ok(());
+        }
+        require!(d.status == DisputeStatus::Trial2Pending, ArbitrationError::InvalidDisputeStatus);
+        require!(d.trial2_rulings.len() >= TRIAL2_PANEL_SIZE || d.trial2_deadline_slot.map_or(false, |dl| slot >= dl), ArbitrationError::TrialNotDeadlined);
+        let (mut rc, mut rf) = (0u32, 0u32);
+        for r in &d.trial2_rulings { match &r.vote { Ruling::ReleaseToCreator => rc += 1, Ruling::RefundBuyer => rf += 1, _ => {} } }
+        let outcome = if rc > rf { Ruling::ReleaseToCreator } else { Ruling::RefundBuyer };
+        d.trial2_outcome = Some(outcome.clone()); d.status = DisputeStatus::Resolved;
+        emit!(DisputeResolved { dispute_id: d.id, outcome, slot });
+        Ok(())
+    }
+
+    pub fn dissolve_panel_for_absence(ctx: Context<DissolvePanelCtx>, dispute_id: u64) -> Result<()> {
+        let slot = Clock::get()?.slot;
+        let status = ctx.accounts.arb_dispute.status.clone();
+        let deadline = if status == DisputeStatus::Trial1Pending { ctx.accounts.arb_dispute.trial1_deadline_slot }
+            else { ctx.accounts.arb_dispute.trial2_deadline_slot.unwrap_or(0) };
+        require!(status == DisputeStatus::Trial1Pending || status == DisputeStatus::Trial2Pending, ArbitrationError::InvalidDisputeStatus);
+        require!(slot >= deadline, ArbitrationError::TrialNotDeadlined);
+
+        let jurors: Vec<Pubkey> = if status == DisputeStatus::Trial1Pending { ctx.accounts.arb_dispute.trial1_jury.to_vec() }
+            else { ctx.accounts.arb_dispute.trial2_panel.map_or(Vec::new(), |p| p.to_vec()) };
+        let ruled: Vec<Pubkey> = if status == DisputeStatus::Trial1Pending { ctx.accounts.arb_dispute.trial1_rulings.iter().map(|r| r.juror).collect() }
+            else { ctx.accounts.arb_dispute.trial2_rulings.iter().map(|r| r.juror).collect() };
+
+        let reg = &mut ctx.accounts.arbitrator_registry;
+        for juror in &jurors {
+            if *juror == Pubkey::default() { continue; }
+            if !ruled.contains(juror) {
+                if let Some(arb) = reg.arbitrators.iter_mut().find(|a| a.user == *juror) {
+                    arb.ars = arb.ars.saturating_sub(20);
+                    arb.excluded_until_slot = Some(slot + ABSENCE_PENALTY_SLOTS);
+                    arb.last_penalty_slot = Some(slot);
+                }
             }
         }
-
-        msg!("Dispute vote recorded");
+        ctx.accounts.arb_dispute.status = DisputeStatus::Dissolved;
         Ok(())
     }
 }
 
 // === Account Structures ===
+#[account] pub struct GovernanceConfig { pub admin: Pubkey, pub proposal_count: u64, pub bump: u8 }
+#[account] pub struct ArbiterRecord { pub arbiter: Pubkey, pub registered_at: i64, pub is_active: bool, pub bump: u8 }
+#[account] pub struct Proposal { pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
+#[account] pub struct VoteRecord { pub voter: Pubkey, pub proposal: Pubkey, pub vote_for: bool, pub vote_weight: u64, pub voted_at: i64, pub bump: u8 }
+#[account] pub struct Dispute { pub plaintiff: Pubkey, pub target_user: Pubkey, pub evidence_uri: String, pub dispute_type: DisputeType, pub status: OldDisputeStatus, pub votes_guilty: u8, pub votes_innocent: u8, pub created_at: i64, pub bump: u8 }
+#[account] pub struct DisputeVote { pub arbiter: Pubkey, pub dispute: Pubkey, pub vote_guilty: bool, pub voted_at: i64, pub bump: u8 }
 
-#[account]
-pub struct GovernanceConfig {
-    pub admin: Pubkey,
-    pub proposal_count: u64,
-    pub bump: u8,
-}
-
-#[account]
-pub struct ArbiterRecord {
-    pub arbiter: Pubkey,
-    pub registered_at: i64,
-    pub is_active: bool,
-    pub bump: u8,
-}
-
-#[account]
-pub struct Proposal {
-    pub proposer: Pubkey,
-    pub title: String,
-    pub description: String,
-    pub committee_type: CommitteeType,
-    pub proposal_type: ProposalType,
-    pub status: ProposalStatus,
-    pub votes_for: u64,
-    pub votes_against: u64,
-    pub total_votes: u64,
-    pub created_at: i64,
-    pub voting_ends_at: i64,
-    pub bump: u8,
-}
-
-// FIX #3: VoteRecord for dedup
-#[account]
-pub struct VoteRecord {
-    pub voter: Pubkey,
-    pub proposal: Pubkey,
-    pub vote_for: bool,
-    pub vote_weight: u64,
-    pub voted_at: i64,
-    pub bump: u8,
-}
-
-#[account]
-pub struct Dispute {
-    pub plaintiff: Pubkey,
-    pub target_user: Pubkey,
-    pub evidence_uri: String,
-    pub dispute_type: DisputeType,
-    pub status: DisputeStatus,
-    pub votes_guilty: u8,
-    pub votes_innocent: u8,
-    pub created_at: i64,
-    pub bump: u8,
-}
-
-// FIX #4: DisputeVote for arbiter dedup
-#[account]
-pub struct DisputeVote {
-    pub arbiter: Pubkey,
-    pub dispute: Pubkey,
-    pub vote_guilty: bool,
-    pub voted_at: i64,
-    pub bump: u8,
-}
-
-// Enums
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum CommitteeType { Development, Content, Operations, Arbitration, Technical }
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum ProposalType { PolicyChange, BudgetAllocation, PartnershipApproval, CodeUpgrade, Other }
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum ProposalStatus { UnderReview, Voting, Passed, Failed, Executed }
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum DisputeType { Copyright, Scam, Harassment, Other }
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
-pub enum DisputeStatus { UnderReview, Guilty, Innocent }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum CommitteeType { Development, Content, Operations, Arbitration, Technical }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ProposalType { PolicyChange, BudgetAllocation, PartnershipApproval, CodeUpgrade, Other }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ProposalStatus { UnderReview, Voting, Passed, Failed, Executed }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum DisputeType { Copyright, Scam, Harassment, Other }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum OldDisputeStatus { UnderReview, Guilty, Innocent }
 
 // === Contexts ===
-
-#[derive(Accounts)]
-pub struct InitializeGovernance<'info> {
-    #[account(
-        init, payer = admin,
-        space = 8 + 32 + 8 + 1,
-        seeds = [b"governance_config"],
-        bump
-    )]
+#[derive(Accounts)] pub struct InitializeGovernance<'info> {
+    #[account(init, payer = admin, space = 8+32+8+1, seeds = [b"governance_config"], bump)]
     pub governance_config: Account<'info, GovernanceConfig>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
-
-#[derive(Accounts)]
-pub struct RegisterArbiter<'info> {
-    #[account(
-        seeds = [b"governance_config"],
-        bump = governance_config.bump,
-        has_one = admin @ ErrorCode::Unauthorized
-    )]
+#[derive(Accounts)] pub struct RegisterArbiter<'info> {
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump, has_one = admin @ ErrorCode::Unauthorized)]
     pub governance_config: Account<'info, GovernanceConfig>,
-    #[account(
-        init, payer = admin,
-        space = 8 + 32 + 8 + 1 + 1,
-        seeds = [b"arbiter", arbiter.key().as_ref()],
-        bump
-    )]
+    #[account(init, payer = admin, space = 8+32+8+1+1, seeds = [b"arbiter", arbiter.key().as_ref()], bump)]
     pub arbiter_record: Account<'info, ArbiterRecord>,
-    /// CHECK: Arbiter being registered
+    /// CHECK: Arbiter
     pub arbiter: AccountInfo<'info>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
-
-#[derive(Accounts)]
-#[instruction(title: String)]
-pub struct CreateProposal<'info> {
-    #[account(
-        init, payer = proposer,
-        space = 8 + 32 + (4 + 100) + (4 + 5000) + 1 + 1 + 1 + 8 + 8 + 8 + 8 + 8 + 1,
-        seeds = [b"proposal", proposer.key().as_ref(), title.as_bytes()],
-        bump
-    )]
+#[derive(Accounts)] #[instruction(title: String)] pub struct CreateProposal<'info> {
+    #[account(init, payer = proposer, space = 8+32+104+5004+1+1+1+8+8+8+8+8+1, seeds = [b"proposal", proposer.key().as_ref(), title.as_bytes()], bump)]
     pub proposal: Account<'info, Proposal>,
-    #[account(mut)]
-    pub proposer: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    #[account(mut)] pub proposer: Signer<'info>, pub system_program: Program<'info, System>,
 }
-
-// FIX #3: VoteRecord PDA prevents double voting
-#[derive(Accounts)]
-pub struct VoteOnProposal<'info> {
-    #[account(mut)]
-    pub proposal: Account<'info, Proposal>,
-    #[account(
-        init, payer = voter,
-        space = 8 + 32 + 32 + 1 + 8 + 8 + 1,
-        seeds = [b"vote", proposal.key().as_ref(), voter.key().as_ref()],
-        bump
-    )]
+#[derive(Accounts)] pub struct VoteOnProposal<'info> {
+    #[account(mut)] pub proposal: Account<'info, Proposal>,
+    #[account(init, payer = voter, space = 8+32+32+1+8+8+1, seeds = [b"vote", proposal.key().as_ref(), voter.key().as_ref()], bump)]
     pub vote_record: Account<'info, VoteRecord>,
-    /// Voter's ORA token account (to read balance for √ voting)
-    pub voter_ora_account: Account<'info, anchor_spl::token::TokenAccount>,
-    #[account(mut)]
-    pub voter: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    pub voter_ora_account: Account<'info, SplTokenAccount>,
+    #[account(mut)] pub voter: Signer<'info>, pub system_program: Program<'info, System>,
 }
-
-#[derive(Accounts)]
-pub struct ExecuteProposal<'info> {
-    #[account(mut)]
-    pub proposal: Account<'info, Proposal>,
-    pub authority: Signer<'info>,
-}
-
-#[derive(Accounts)]
-pub struct CreateDispute<'info> {
-    #[account(
-        init, payer = plaintiff,
-        space = 8 + 32 + 32 + (4 + 200) + 1 + 1 + 1 + 1 + 8 + 1,
-        seeds = [b"dispute", plaintiff.key().as_ref(), target_user.key().as_ref()],
-        bump
-    )]
+#[derive(Accounts)] pub struct ExecuteProposal<'info> { #[account(mut)] pub proposal: Account<'info, Proposal>, pub authority: Signer<'info> }
+#[derive(Accounts)] pub struct CreateDispute<'info> {
+    #[account(init, payer = plaintiff, space = 8+32+32+204+1+1+1+1+8+1, seeds = [b"dispute", plaintiff.key().as_ref(), target_user.key().as_ref()], bump)]
     pub dispute: Account<'info, Dispute>,
-    #[account(mut)]
-    pub plaintiff: Signer<'info>,
-    /// CHECK: Target user
-    pub target_user: AccountInfo<'info>,
-    pub system_program: Program<'info, System>,
+    #[account(mut)] pub plaintiff: Signer<'info>,
+    /// CHECK: Target
+    pub target_user: AccountInfo<'info>, pub system_program: Program<'info, System>,
 }
-
-// FIX #4: Arbiter must be registered + dispute vote PDA for dedup
-#[derive(Accounts)]
-pub struct VoteOnDispute<'info> {
-    #[account(mut)]
-    pub dispute: Account<'info, Dispute>,
-    #[account(
-        seeds = [b"arbiter", arbiter.key().as_ref()],
-        bump = arbiter_record.bump,
-        constraint = arbiter_record.arbiter == arbiter.key() @ ErrorCode::Unauthorized
-    )]
+#[derive(Accounts)] pub struct VoteOnDispute<'info> {
+    #[account(mut)] pub dispute: Account<'info, Dispute>,
+    #[account(seeds = [b"arbiter", arbiter.key().as_ref()], bump = arbiter_record.bump, constraint = arbiter_record.arbiter == arbiter.key() @ ErrorCode::Unauthorized)]
     pub arbiter_record: Account<'info, ArbiterRecord>,
-    #[account(
-        init, payer = arbiter,
-        space = 8 + 32 + 32 + 1 + 8 + 1,
-        seeds = [b"dispute_vote", dispute.key().as_ref(), arbiter.key().as_ref()],
-        bump
-    )]
+    #[account(init, payer = arbiter, space = 8+32+32+1+8+1, seeds = [b"dispute_vote", dispute.key().as_ref(), arbiter.key().as_ref()], bump)]
     pub dispute_vote: Account<'info, DisputeVote>,
-    #[account(mut)]
-    pub arbiter: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    #[account(mut)] pub arbiter: Signer<'info>, pub system_program: Program<'info, System>,
 }
 
+// === Arbitration Contexts ===
+#[derive(Accounts)] pub struct InitArbitrationGovernanceCtx<'info> {
+    #[account(init, payer = admin, space = ArbitrationGovernance::SIZE, seeds = [b"arb-governance"], bump)]
+    pub arbitration_governance: Account<'info, ArbitrationGovernance>,
+    #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)] pub struct InitArbitratorRegistryCtx<'info> {
+    #[account(init, payer = admin, space = ArbitratorRegistry::MAX_SIZE, seeds = [b"arb-registry"], bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)] pub struct RegisterAsArbitratorCtx<'info> {
+    #[account(mut, seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    pub user_ora_account: Account<'info, SplTokenAccount>,
+    #[account(mut)] pub user: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(redemption_id: u64, coin_mint: Pubkey, defendant: Pubkey)]
+pub struct FileArbitrationDisputeCtx<'info> {
+    #[account(mut, seeds = [b"arb-governance"], bump = arbitration_governance.bump)]
+    pub arbitration_governance: Account<'info, ArbitrationGovernance>,
+    #[account(init, payer = plaintiff, space = ArbitrationDispute::SIZE, seeds = [b"arb-dispute", arbitration_governance.dispute_count.to_le_bytes().as_ref()], bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    #[account(mut)] pub plaintiff: Signer<'info>, pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SelectTrial1JuryCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    #[account(seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    pub caller: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SubmitTrial1RulingCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    pub juror: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct FinalizeTrial1Ctx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    pub caller: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct AppealToTrial2Ctx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    pub appellant: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SelectTrial2PanelCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    #[account(seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    pub caller: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SubmitTrial2RulingCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    pub juror: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct FinalizeDisputeCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    pub caller: Signer<'info>,
+}
+#[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct DissolvePanelCtx<'info> {
+    #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
+    pub arb_dispute: Account<'info, ArbitrationDispute>,
+    #[account(mut, seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    pub caller: Signer<'info>,
+}
+
+// === Errors ===
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Title is too long (max 100)")] TitleTooLong,
-    #[msg("Description is too long (max 5000)")] DescriptionTooLong,
-    #[msg("Proposal is not in voting status")] ProposalNotVoting,
-    #[msg("Voting period has ended")] VotingEnded,
-    #[msg("Voting period has not ended")] VotingNotEnded,
+    #[msg("Title too long")] TitleTooLong,
+    #[msg("Description too long")] DescriptionTooLong,
+    #[msg("Proposal not in voting")] ProposalNotVoting,
+    #[msg("Voting ended")] VotingEnded,
+    #[msg("Voting not ended")] VotingNotEnded,
     #[msg("Invalid vote weight")] InvalidVoteWeight,
     #[msg("Invalid proposal status")] InvalidProposalStatus,
-    #[msg("Evidence URI is too long")] EvidenceUriTooLong,
+    #[msg("Evidence URI too long")] EvidenceUriTooLong,
     #[msg("Dispute already resolved")] DisputeAlreadyResolved,
     #[msg("Unauthorized")] Unauthorized,
-    #[msg("Arbiter is not active")] ArbiterNotActive,
+    #[msg("Arbiter not active")] ArbiterNotActive,
     #[msg("Overflow")] Overflow,
 }

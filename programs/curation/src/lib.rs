@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("CurationProgram111111111111111111111111111111");
+declare_id!("D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8");
 
 #[program]
 pub mod aura_curation {

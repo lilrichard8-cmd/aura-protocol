@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("ReputationProgram111111111111111111111111111111");
+declare_id!("GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg");
 
 #[program]
 pub mod aura_reputation {

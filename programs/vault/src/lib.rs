@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("VaultProgram1111111111111111111111111111111");
+declare_id!("9sefu7Jr4kAdASSro3AHpTp7XVcShveDntZWvPeJczNL");
 
 #[program]
 pub mod aura_vault {

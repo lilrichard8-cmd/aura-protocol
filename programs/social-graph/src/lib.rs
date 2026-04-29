@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("SocialGraphProgram1111111111111111111111111111");
+declare_id!("GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN");
 
 #[program]
 pub mod aura_social_graph {

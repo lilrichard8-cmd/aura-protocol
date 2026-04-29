@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("LicenseProgram111111111111111111111111111111");
+declare_id!("9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE");
 
 #[program]
 pub mod aura_content_license {

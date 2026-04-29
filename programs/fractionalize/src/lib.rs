@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount, Transfer};
 
-declare_id!("FractionalizeProgram11111111111111111111111111");
+declare_id!("3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S");
 
 #[program]
 pub mod aura_fractionalize {

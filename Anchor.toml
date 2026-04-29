@@ -1,0 +1,25 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+aura_creator_coin = "B38n2DX7BR4tEait7Pn3SHUwB29WQt4U8jttCQgJZ57w"
+aura_market = "5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV"
+aura_governance = "7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk"
+aura_core = "Ho5Ent8c2D6eLAZuyW16iUekqMmpfqzoTspXbMQqa9JN"
+aura_vault = "9sefu7Jr4kAdASSro3AHpTp7XVcShveDntZWvPeJczNL"
+aura_curation = "D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8"
+aura_social_graph = "GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN"
+aura_content_license = "9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE"
+aura_reputation = "GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg"
+aura_fractionalize = "3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "npx ts-mocha -p ./tsconfig.json -t 1000000 'tests/**/*.ts'"
