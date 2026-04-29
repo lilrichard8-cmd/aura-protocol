@@ -44,6 +44,7 @@ pub mod aura_creator_coin {
         ctx: Context<CreateCreatorCoin>,
         symbol: String,
         initial_price: u64,
+        activity_oracle: Pubkey,
     ) -> Result<()> {
         require!(symbol.len() <= 10, ErrorCode::SymbolTooLong);
 
@@ -85,6 +86,8 @@ pub mod aura_creator_coin {
         coin.created_at = now;
         coin.total_trading_volume = 0;
         coin.total_fees_earned = 0;
+        // [audit fix C-7] persist activity oracle authority for unlock_monthly gating
+        coin.activity_oracle = activity_oracle;
         coin.bump = bump;
 
         let slot = Clock::get()?.slot;
@@ -94,7 +97,10 @@ pub mod aura_creator_coin {
         Ok(())
     }
 
-    /// Monthly unlock: creator claims 800 tokens if active
+    /// [audit fix C-7] Monthly unlock: gated by activity oracle (NOT creator self-report)
+    /// Restores 2026-04-10 security fix that the subagent reverted.
+    /// Activity counts (posts/trades/interactions) are signed by the oracle authority
+    /// stored on `creator_coin.activity_oracle`; only the oracle signer can call this.
     pub fn unlock_monthly(
         ctx: Context<UnlockMonthly>,
         monthly_posts: u32,
@@ -102,13 +108,19 @@ pub mod aura_creator_coin {
         monthly_interactions: u32,
     ) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
-        let locked_supply = ctx.accounts.creator_coin.locked_supply;
-        let months_unlocked = ctx.accounts.creator_coin.months_unlocked;
-        let last_unlock_time = ctx.accounts.creator_coin.last_unlock_time;
-        let creator_key = ctx.accounts.creator_coin.creator;
-        let coin_bump = ctx.accounts.creator_coin.bump;
-        let mint_key = ctx.accounts.creator_coin.mint;
-        let initial_price = ctx.accounts.creator_coin.initial_price;
+        let coin_ro = &ctx.accounts.creator_coin;
+        let locked_supply = coin_ro.locked_supply;
+        let months_unlocked = coin_ro.months_unlocked;
+        let last_unlock_time = coin_ro.last_unlock_time;
+        let creator_key = coin_ro.creator;
+        let coin_bump = coin_ro.bump;
+        let mint_key = coin_ro.mint;
+        let initial_price = coin_ro.initial_price;
+        // [audit fix C-7] verify oracle is the recorded one
+        require!(
+            ctx.accounts.activity_oracle.key() == coin_ro.activity_oracle,
+            ErrorCode::Unauthorized
+        );
 
         require!(locked_supply > 0, ErrorCode::FullyUnlocked);
         require!(months_unlocked < UNLOCK_MONTHS, ErrorCode::FullyUnlocked);
@@ -702,6 +714,8 @@ pub struct CreatorCoin {
     pub initial_price: u64, pub total_supply: u64, pub circulating_supply: u64,
     pub locked_supply: u64, pub months_unlocked: u8, pub last_unlock_time: i64,
     pub created_at: i64, pub total_trading_volume: u64, pub total_fees_earned: u64,
+    /// [audit fix C-7] Activity oracle authority — the only key allowed to call unlock_monthly
+    pub activity_oracle: Pubkey,
     pub bump: u8,
 }
 
@@ -733,7 +747,8 @@ impl BurnTracker { pub const SIZE: usize = 8 + 16 + 8 + 1; }
 #[derive(Accounts)]
 #[instruction(symbol: String)]
 pub struct CreateCreatorCoin<'info> {
-    #[account(init, payer = creator, space = 8 + 32 + 32 + 14 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 8 + 8 + 1,
+    // [audit fix C-7] +32 for activity_oracle field
+    #[account(init, payer = creator, space = 8 + 32 + 32 + 14 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 8 + 8 + 32 + 1,
         seeds = [b"creator_coin", creator.key().as_ref()], bump)]
     pub creator_coin: Account<'info, CreatorCoin>,
     #[account(init, payer = creator, mint::decimals = 9, mint::authority = creator_coin,
@@ -760,7 +775,10 @@ pub struct UnlockMonthly<'info> {
     pub creator_coin_mint: Account<'info, Mint>,
     #[account(mut)]
     pub creator_token_account: Account<'info, TokenAccount>,
-    pub creator: Signer<'info>,
+    /// CHECK: pubkey-only — must equal creator_coin.activity_oracle
+    pub creator: AccountInfo<'info>,
+    /// [audit fix C-7] Activity oracle MUST sign — prevents creator self-report
+    pub activity_oracle: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
 

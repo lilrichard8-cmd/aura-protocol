@@ -20,10 +20,13 @@ fn isqrt(n: u64) -> u64 {
 pub mod aura_governance {
     use super::*;
 
-    pub fn initialize_governance(ctx: Context<InitializeGovernance>) -> Result<()> {
+    // [audit fix C-21/C-22] accept ora_mint + quorum at initialization
+    pub fn initialize_governance(ctx: Context<InitializeGovernance>, ora_mint: Pubkey, quorum: u64) -> Result<()> {
         let config = &mut ctx.accounts.governance_config;
         config.admin = ctx.accounts.admin.key();
         config.proposal_count = 0;
+        config.ora_mint = ora_mint;
+        config.quorum = quorum;
         config.bump = ctx.bumps.governance_config;
         Ok(())
     }
@@ -47,32 +50,53 @@ pub mod aura_governance {
         p.status = ProposalStatus::Voting; p.votes_for = 0; p.votes_against = 0; p.total_votes = 0;
         p.created_at = clock.unix_timestamp; p.voting_ends_at = clock.unix_timestamp + 604800;
         p.bump = ctx.bumps.proposal;
+        // [audit fix C-22] increment proposal_count for indexing/numbering
+        let cfg = &mut ctx.accounts.governance_config;
+        cfg.proposal_count = cfg.proposal_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
         Ok(())
     }
 
     pub fn vote_on_proposal(ctx: Context<VoteOnProposal>, vote_for: bool) -> Result<()> {
-        let proposal = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
-        require!(proposal.status == ProposalStatus::Voting, ErrorCode::ProposalNotVoting);
-        require!(clock.unix_timestamp < proposal.voting_ends_at, ErrorCode::VotingEnded);
+        // Capture immutable values before taking mutable borrows
+        let proposal_key = ctx.accounts.proposal.key();
+        let voter_key = ctx.accounts.voter.key();
+        let ora_mint = ctx.accounts.governance_config.ora_mint;
         let ora_balance = ctx.accounts.voter_ora_account.amount;
+        let voter_ora_mint = ctx.accounts.voter_ora_account.mint;
+        let voter_ora_owner = ctx.accounts.voter_ora_account.owner;
+        let bump_vr = ctx.bumps.vote_record;
+        // [audit fix C-21] mint+owner validation
+        require!(voter_ora_mint == ora_mint, ErrorCode::Unauthorized);
+        require!(voter_ora_owner == voter_key, ErrorCode::Unauthorized);
         require!(ora_balance > 0, ErrorCode::InvalidVoteWeight);
         let vote_weight = isqrt(ora_balance / 1_000_000_000).min(MAX_VOTE_WEIGHT);
         require!(vote_weight > 0, ErrorCode::InvalidVoteWeight);
-        let vr = &mut ctx.accounts.vote_record;
-        vr.voter = ctx.accounts.voter.key(); vr.proposal = ctx.accounts.proposal.key();
-        vr.vote_for = vote_for; vr.vote_weight = vote_weight;
-        vr.voted_at = clock.unix_timestamp; vr.bump = ctx.bumps.vote_record;
+
+        let proposal = &mut ctx.accounts.proposal;
+        require!(proposal.status == ProposalStatus::Voting, ErrorCode::ProposalNotVoting);
+        require!(clock.unix_timestamp < proposal.voting_ends_at, ErrorCode::VotingEnded);
         if vote_for { proposal.votes_for = proposal.votes_for.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?; }
         else { proposal.votes_against = proposal.votes_against.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?; }
         proposal.total_votes = proposal.total_votes.checked_add(vote_weight).ok_or(ErrorCode::Overflow)?;
+
+        let vr = &mut ctx.accounts.vote_record;
+        vr.voter = voter_key; vr.proposal = proposal_key;
+        vr.vote_for = vote_for; vr.vote_weight = vote_weight;
+        vr.voted_at = clock.unix_timestamp; vr.bump = bump_vr;
         Ok(())
     }
 
     pub fn execute_proposal(ctx: Context<ExecuteProposal>) -> Result<()> {
+        let cfg = &ctx.accounts.governance_config;
         let proposal = &mut ctx.accounts.proposal;
         require!(Clock::get()?.unix_timestamp >= proposal.voting_ends_at, ErrorCode::VotingNotEnded);
         require!(proposal.status == ProposalStatus::Voting, ErrorCode::InvalidProposalStatus);
+        // [audit fix C-22] only admin or proposer may execute
+        let signer = ctx.accounts.authority.key();
+        require!(signer == cfg.admin || signer == proposal.proposer, ErrorCode::Unauthorized);
+        // [audit fix C-22] enforce quorum: total weighted votes must meet config.quorum
+        require!(proposal.total_votes >= cfg.quorum, ErrorCode::QuorumNotReached);
         proposal.status = if proposal.votes_for > proposal.votes_against { ProposalStatus::Passed } else { ProposalStatus::Failed };
         Ok(())
     }
@@ -88,16 +112,20 @@ pub mod aura_governance {
     }
 
     pub fn vote_on_dispute(ctx: Context<VoteOnDispute>, vote_guilty: bool) -> Result<()> {
+        require!(ctx.accounts.arbiter_record.is_active, ErrorCode::ArbiterNotActive);
+        let arbiter_key = ctx.accounts.arbiter.key();
+        let dispute_key = ctx.accounts.dispute.key();
+        let bump_dv = ctx.bumps.dispute_vote;
+        let now_ts = Clock::get()?.unix_timestamp;
         let dispute = &mut ctx.accounts.dispute;
         require!(dispute.status == OldDisputeStatus::UnderReview, ErrorCode::DisputeAlreadyResolved);
-        require!(ctx.accounts.arbiter_record.is_active, ErrorCode::ArbiterNotActive);
-        let dv = &mut ctx.accounts.dispute_vote;
-        dv.arbiter = ctx.accounts.arbiter.key(); dv.dispute = ctx.accounts.dispute.key();
-        dv.vote_guilty = vote_guilty; dv.voted_at = Clock::get()?.unix_timestamp; dv.bump = ctx.bumps.dispute_vote;
         if vote_guilty { dispute.votes_guilty += 1; } else { dispute.votes_innocent += 1; }
         if (dispute.votes_guilty + dispute.votes_innocent) >= 4 {
             dispute.status = if dispute.votes_guilty > dispute.votes_innocent { OldDisputeStatus::Guilty } else { OldDisputeStatus::Innocent };
         }
+        let dv = &mut ctx.accounts.dispute_vote;
+        dv.arbiter = arbiter_key; dv.dispute = dispute_key;
+        dv.vote_guilty = vote_guilty; dv.voted_at = now_ts; dv.bump = bump_dv;
         Ok(())
     }
 
@@ -294,7 +322,15 @@ pub mod aura_governance {
 }
 
 // === Account Structures ===
-#[account] pub struct GovernanceConfig { pub admin: Pubkey, pub proposal_count: u64, pub bump: u8 }
+// [audit fix C-21/C-22] add ora_mint + quorum to GovernanceConfig
+#[account]
+pub struct GovernanceConfig {
+    pub admin: Pubkey,        // 32
+    pub proposal_count: u64,  // 8
+    pub ora_mint: Pubkey,     // 32 — voters' ORA token accounts must match this mint
+    pub quorum: u64,          // 8 — minimum total_votes weight required to execute
+    pub bump: u8,             // 1
+}
 #[account] pub struct ArbiterRecord { pub arbiter: Pubkey, pub registered_at: i64, pub is_active: bool, pub bump: u8 }
 #[account] pub struct Proposal { pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
 #[account] pub struct VoteRecord { pub voter: Pubkey, pub proposal: Pubkey, pub vote_for: bool, pub vote_weight: u64, pub voted_at: i64, pub bump: u8 }
@@ -309,7 +345,8 @@ pub mod aura_governance {
 
 // === Contexts ===
 #[derive(Accounts)] pub struct InitializeGovernance<'info> {
-    #[account(init, payer = admin, space = 8+32+8+1, seeds = [b"governance_config"], bump)]
+    // [audit fix C-21/C-22] expanded space for ora_mint + quorum
+    #[account(init, payer = admin, space = 8+32+8+32+8+1, seeds = [b"governance_config"], bump)]
     pub governance_config: Account<'info, GovernanceConfig>,
     #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
@@ -323,18 +360,28 @@ pub mod aura_governance {
     #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
 #[derive(Accounts)] #[instruction(title: String)] pub struct CreateProposal<'info> {
+    #[account(mut, seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     #[account(init, payer = proposer, space = 8+32+104+5004+1+1+1+8+8+8+8+8+1, seeds = [b"proposal", proposer.key().as_ref(), title.as_bytes()], bump)]
     pub proposal: Account<'info, Proposal>,
     #[account(mut)] pub proposer: Signer<'info>, pub system_program: Program<'info, System>,
 }
 #[derive(Accounts)] pub struct VoteOnProposal<'info> {
+    // [audit fix C-21] read-only governance_config to enforce ora_mint
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     #[account(mut)] pub proposal: Account<'info, Proposal>,
     #[account(init, payer = voter, space = 8+32+32+1+8+8+1, seeds = [b"vote", proposal.key().as_ref(), voter.key().as_ref()], bump)]
     pub vote_record: Account<'info, VoteRecord>,
     pub voter_ora_account: Account<'info, SplTokenAccount>,
     #[account(mut)] pub voter: Signer<'info>, pub system_program: Program<'info, System>,
 }
-#[derive(Accounts)] pub struct ExecuteProposal<'info> { #[account(mut)] pub proposal: Account<'info, Proposal>, pub authority: Signer<'info> }
+#[derive(Accounts)] pub struct ExecuteProposal<'info> {
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    #[account(mut)] pub proposal: Account<'info, Proposal>,
+    pub authority: Signer<'info>,
+}
 #[derive(Accounts)] pub struct CreateDispute<'info> {
     #[account(init, payer = plaintiff, space = 8+32+32+204+1+1+1+1+8+1, seeds = [b"dispute", plaintiff.key().as_ref(), target_user.key().as_ref()], bump)]
     pub dispute: Account<'info, Dispute>,
@@ -438,4 +485,5 @@ pub enum ErrorCode {
     #[msg("Unauthorized")] Unauthorized,
     #[msg("Arbiter not active")] ArbiterNotActive,
     #[msg("Overflow")] Overflow,
+    #[msg("Quorum not reached")] QuorumNotReached,
 }
