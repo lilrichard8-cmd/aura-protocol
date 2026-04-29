@@ -479,7 +479,9 @@ pub mod aura_creator_coin {
         require!(ctx.accounts.redemption.status == RedemptionStatus::Delivered, RedemptionError::InvalidStatusTransition);
 
         let current_slot = Clock::get()?.slot;
-        require!(current_slot > delivered_slot + AUTO_CONFIRM_SLOTS, RedemptionError::AutoConfirmTooEarly);
+        // [audit fix C-10] checked_add to prevent overflow on extreme slot values
+        let auto_confirm_at = delivered_slot.checked_add(AUTO_CONFIRM_SLOTS).ok_or(RedemptionError::Overflow)?;
+        require!(current_slot > auto_confirm_at, RedemptionError::AutoConfirmTooEarly);
 
         let id_bytes = id.to_le_bytes();
         let signer_seeds: &[&[u8]] = &[b"redemption", coin_mint.as_ref(), id_bytes.as_ref(), &[bump]];
@@ -860,11 +862,19 @@ pub struct InitiateRedemptionCtx<'info> {
     #[account(init, payer = buyer, space = Redemption::SIZE,
         seeds = [b"redemption", benefits_list.coin_mint.as_ref(), redemption_counter.count.to_le_bytes().as_ref()], bump)]
     pub redemption: Account<'info, Redemption>,
-    #[account(mut, constraint = buyer_token_account.owner == buyer.key() @ RedemptionError::Unauthorized)]
+    // [audit fix C-4] enforce mint matches coin_mint AND owner == buyer
+    #[account(mut,
+        constraint = buyer_token_account.owner == buyer.key() @ RedemptionError::Unauthorized,
+        constraint = buyer_token_account.mint == benefits_list.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub buyer_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-4] escrow must be owned by the redemption PDA AND match coin mint
+    #[account(mut,
+        constraint = escrow_token_account.owner == redemption.key() @ RedemptionError::Unauthorized,
+        constraint = escrow_token_account.mint == benefits_list.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub escrow_token_account: Account<'info, TokenAccount>,
-    /// CHECK: Creator
+    /// CHECK: Creator pubkey persisted into Redemption.creator; subsequent calls validate has_one
     pub creator: AccountInfo<'info>,
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -887,9 +897,17 @@ pub struct ConfirmReceiptCtx<'info> {
     #[account(mut, seeds = [b"redemption", redemption.coin_mint.as_ref(), redemption_id.to_le_bytes().as_ref()],
         bump = redemption.bump, has_one = buyer @ RedemptionError::Unauthorized)]
     pub redemption: Account<'info, Redemption>,
-    #[account(mut)]
+    // [audit fix C-1] escrow must be PDA-owned + mint must match
+    #[account(mut,
+        constraint = escrow_token_account.owner == redemption.key() @ RedemptionError::Unauthorized,
+        constraint = escrow_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-1] destination MUST be the creator's account, not buyer-supplied
+    #[account(mut,
+        constraint = creator_token_account.owner == redemption.creator @ RedemptionError::Unauthorized,
+        constraint = creator_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
     pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
@@ -901,9 +919,17 @@ pub struct AutoConfirmCtx<'info> {
     #[account(mut, seeds = [b"redemption", redemption.coin_mint.as_ref(), redemption_id.to_le_bytes().as_ref()],
         bump = redemption.bump)]
     pub redemption: Account<'info, Redemption>,
-    #[account(mut)]
+    // [audit fix C-2] escrow must be PDA-owned + mint matches
+    #[account(mut,
+        constraint = escrow_token_account.owner == redemption.key() @ RedemptionError::Unauthorized,
+        constraint = escrow_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-2] auto-confirm always releases to the creator; lock destination to creator's ATA
+    #[account(mut,
+        constraint = creator_token_account.owner == redemption.creator @ RedemptionError::Unauthorized,
+        constraint = creator_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
     pub keeper: Signer<'info>,
     pub token_program: Program<'info, Token>,
@@ -924,15 +950,37 @@ pub struct ExecuteRulingCtx<'info> {
     #[account(mut, seeds = [b"redemption", redemption.coin_mint.as_ref(), redemption_id.to_le_bytes().as_ref()],
         bump = redemption.bump)]
     pub redemption: Account<'info, Redemption>,
-    #[account(mut)]
+    // [audit fix C-3] escrow must be PDA-owned + correct mint
+    #[account(mut,
+        constraint = escrow_token_account.owner == redemption.key() @ RedemptionError::Unauthorized,
+        constraint = escrow_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-3] both potential destinations are validated against the redemption record
+    #[account(mut,
+        constraint = creator_token_account.owner == redemption.creator @ RedemptionError::Unauthorized,
+        constraint = creator_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    #[account(mut,
+        constraint = buyer_token_account.owner == redemption.buyer @ RedemptionError::Unauthorized,
+        constraint = buyer_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
+    )]
     pub buyer_token_account: Account<'info, TokenAccount>,
+    // [audit fix C-3] authority MUST be the configured arbitration_authority PDA from governance.
+    // For now: constrain via arbitration_authority account whose key is stored on Redemption (TODO).
+    // Until governance CPI integration is wired, only the documented protocol authority key may sign.
+    // PROTOCOL_AUTHORITY is hardcoded below and will be replaced by governance program PDA after audit fix Phase 3.
+    #[account(constraint = authority.key() == PROTOCOL_AUTHORITY @ RedemptionError::Unauthorized)]
     pub authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
+
+/// [audit fix C-3] Hardcoded protocol authority for arbitration ruling execution.
+/// ⚠️ DO NOT DEPLOY: this is the System Program ID as a build-time placeholder so the
+/// program compiles. PRE-MAINNET TODO: replace with the real Year 1 multisig pubkey
+/// (5/7) and after Phase 3 with a governance program PDA via CPI.
+pub const PROTOCOL_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 // Gift context
 #[derive(Accounts)]

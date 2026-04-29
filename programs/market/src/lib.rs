@@ -9,6 +9,12 @@ pub use buy_order::*;
 
 declare_id!("5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV");
 
+/// [audit fix C-6/C-20] Hardcoded protocol fee pools.
+/// ⚠️ DO NOT DEPLOY — placeholder = system program ID; replace with real protocol PDAs pre-mainnet.
+pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+
 #[program]
 pub mod aura_market {
     use super::*;
@@ -407,7 +413,14 @@ pub mod aura_market {
     pub system_program: Program<'info, System>,
 }
 #[derive(Accounts)] pub struct SubmitBountyWork<'info> { #[account(mut)] pub bounty: Account<'info, Bounty>, pub submitter: Signer<'info> }
-#[derive(Accounts)] pub struct AwardBounty<'info> { #[account(mut, has_one = creator)] pub bounty: Account<'info, Bounty>, pub creator: Signer<'info>, /// CHECK: Winner pub winner: AccountInfo<'info> }
+#[derive(Accounts)]
+pub struct AwardBounty<'info> {
+    #[account(mut, has_one = creator)]
+    pub bounty: Account<'info, Bounty>,
+    pub creator: Signer<'info>,
+    /// CHECK: Winner address only; rewards are distributed off this pubkey.
+    pub winner: AccountInfo<'info>,
+}
 #[derive(Accounts)] pub struct GrantLicense<'info> {
     #[account(init, payer = licensor, space = 8+32+32+2+8+1+1, seeds = [b"license", licensor.key().as_ref(), licensee.key().as_ref()], bump)]
     pub license: Account<'info, License>,
@@ -416,7 +429,9 @@ pub mod aura_market {
     pub licensee: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
-#[derive(Accounts)] pub struct PlaceAdBid<'info> {
+#[derive(Accounts)]
+#[instruction(bid_amount: u64, target_slot: u8)]
+pub struct PlaceAdBid<'info> {
     #[account(init, payer = bidder, space = 8+32+8+1+1+8+1, seeds = [b"ad_bid", bidder.key().as_ref(), &[target_slot]], bump)]
     pub ad_bid: Account<'info, AdBid>,
     #[account(mut)] pub bidder: Signer<'info>,
@@ -463,14 +478,38 @@ pub struct CancelSellOrderCtx<'info> {
 pub struct FillSellOrderCtx<'info> {
     #[account(mut, seeds = [b"sell-order", sell_order.coin_mint.as_ref(), order_id.to_le_bytes().as_ref()], bump = sell_order.bump)]
     pub sell_order: Account<'info, SellOrder>,
-    #[account(mut)] pub escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub buyer_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub buyer_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub seller_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub ora_mint: Account<'info, Mint>,
-    #[account(mut)] pub staking_rewards_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub gas_reserve_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub ops_treasury_account: Account<'info, TokenAccount>,
+    // [audit fix C-5/C-6] PDA-owned escrow + mint == sell_order.coin_mint
+    #[account(mut,
+        constraint = escrow_token_account.owner == sell_order.key() @ SellOrderError::Unauthorized,
+        constraint = escrow_token_account.mint == sell_order.coin_mint @ SellOrderError::Unauthorized
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+    // [audit fix] CC destination is buyer's account; mint must match
+    #[account(mut,
+        constraint = buyer_token_account.owner == buyer.key() @ SellOrderError::Unauthorized,
+        constraint = buyer_token_account.mint == sell_order.coin_mint @ SellOrderError::Unauthorized
+    )]
+    pub buyer_token_account: Account<'info, TokenAccount>,
+    // [audit fix] buyer pays from their own ORA
+    #[account(mut,
+        constraint = buyer_ora_account.owner == buyer.key() @ SellOrderError::Unauthorized,
+        constraint = buyer_ora_account.mint == ora_mint.key() @ SellOrderError::Unauthorized
+    )]
+    pub buyer_ora_account: Account<'info, TokenAccount>,
+    // [audit fix C-5] seller's ORA destination MUST belong to sell_order.seller (not buyer-supplied)
+    #[account(mut,
+        constraint = seller_ora_account.owner == sell_order.seller @ SellOrderError::Unauthorized,
+        constraint = seller_ora_account.mint == ora_mint.key() @ SellOrderError::Unauthorized
+    )]
+    pub seller_ora_account: Account<'info, TokenAccount>,
+    pub ora_mint: Account<'info, Mint>,
+    // [audit fix C-6] fee buckets locked to protocol PDAs
+    #[account(mut, address = STAKING_REWARDS_POOL @ SellOrderError::Unauthorized)]
+    pub staking_rewards_account: Account<'info, TokenAccount>,
+    #[account(mut, address = GAS_RESERVE_POOL @ SellOrderError::Unauthorized)]
+    pub gas_reserve_account: Account<'info, TokenAccount>,
+    #[account(mut, address = OPS_TREASURY_POOL @ SellOrderError::Unauthorized)]
+    pub ops_treasury_account: Account<'info, TokenAccount>,
     #[account(mut)] pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -515,15 +554,38 @@ pub struct CancelBuyOrderCtx<'info> {
 pub struct FillBuyOrderCtx<'info> {
     #[account(mut, seeds = [b"buy-order", buy_order.coin_mint.as_ref(), order_id.to_le_bytes().as_ref()], bump = buy_order.bump)]
     pub buy_order: Account<'info, BuyOrder>,
-    #[account(mut)] pub escrow_ora_account: Account<'info, TokenAccount>,
-    #[account(mut, constraint = seller_token_account.owner == seller.key() @ BuyOrderError::Unauthorized)]
+    // [audit fix] PDA-owned ORA escrow + ORA mint match
+    #[account(mut,
+        constraint = escrow_ora_account.owner == buy_order.key() @ BuyOrderError::Unauthorized,
+        constraint = escrow_ora_account.mint == ora_mint.key() @ BuyOrderError::Unauthorized
+    )]
+    pub escrow_ora_account: Account<'info, TokenAccount>,
+    // seller provides CC; mint must match
+    #[account(mut,
+        constraint = seller_token_account.owner == seller.key() @ BuyOrderError::Unauthorized,
+        constraint = seller_token_account.mint == buy_order.coin_mint @ BuyOrderError::Unauthorized
+    )]
     pub seller_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub buyer_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub seller_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub ora_mint: Account<'info, Mint>,
-    #[account(mut)] pub staking_rewards_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub gas_reserve_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub ops_treasury_account: Account<'info, TokenAccount>,
+    // [audit fix C-19] buyer destination MUST be the buyer recorded on the order
+    #[account(mut,
+        constraint = buyer_token_account.owner == buy_order.buyer @ BuyOrderError::Unauthorized,
+        constraint = buyer_token_account.mint == buy_order.coin_mint @ BuyOrderError::Unauthorized
+    )]
+    pub buyer_token_account: Account<'info, TokenAccount>,
+    // seller's ORA receiving account; mint must match ORA
+    #[account(mut,
+        constraint = seller_ora_account.owner == seller.key() @ BuyOrderError::Unauthorized,
+        constraint = seller_ora_account.mint == ora_mint.key() @ BuyOrderError::Unauthorized
+    )]
+    pub seller_ora_account: Account<'info, TokenAccount>,
+    pub ora_mint: Account<'info, Mint>,
+    // [audit fix C-20] fee buckets locked to protocol PDAs
+    #[account(mut, address = STAKING_REWARDS_POOL @ BuyOrderError::Unauthorized)]
+    pub staking_rewards_account: Account<'info, TokenAccount>,
+    #[account(mut, address = GAS_RESERVE_POOL @ BuyOrderError::Unauthorized)]
+    pub gas_reserve_account: Account<'info, TokenAccount>,
+    #[account(mut, address = OPS_TREASURY_POOL @ BuyOrderError::Unauthorized)]
+    pub ops_treasury_account: Account<'info, TokenAccount>,
     #[account(mut)] pub seller: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
