@@ -90,10 +90,19 @@ pub mod aura_creator_coin {
         coin.activity_oracle = activity_oracle;
         coin.bump = bump;
 
+        // [audit fix H-9] populate benefits_list atomically
+        let bl_bump = ctx.bumps.benefits_list;
+        let bl = &mut ctx.accounts.benefits_list;
+        bl.coin_mint = mint_key;
+        bl.creator = creator_key;
+        bl.benefits = Vec::new();
+        bl.next_id = 0;
+        bl.bump = bl_bump;
+
         let slot = Clock::get()?.slot;
         emit!(CoinMinted { mint: mint_key, creator: creator_key, slot });
 
-        msg!("Creator Coin '{}' created: 2000 minted, 8000 locked", symbol);
+        msg!("Creator Coin '{}' created: 2000 minted, 8000 locked, benefits list initialized", symbol);
         Ok(())
     }
 
@@ -539,7 +548,14 @@ pub mod aura_creator_coin {
         Ok(())
     }
 
-    pub fn execute_ruling(ctx: Context<ExecuteRulingCtx>, redemption_id: u64, release_to_creator: bool) -> Result<()> {
+    /// [audit fix H-1/C-6] execute_ruling supports three rulings per whitepaper §13.8:
+    ///   - ReleaseToCreator: full escrow → creator
+    ///   - RefundBuyer:      full escrow → buyer
+    ///   - Split (bps):      creator_share_bps to creator, remainder to buyer
+    /// `creator_share_bps == 10000` means full release to creator (== ReleaseToCreator);
+    /// `0` means full refund (== RefundBuyer); any value 1..9999 is a true split.
+    pub fn execute_ruling(ctx: Context<ExecuteRulingCtx>, redemption_id: u64, creator_share_bps: u16) -> Result<()> {
+        require!(creator_share_bps <= 10_000, RedemptionError::InvalidAmount);
         let coin_mint = ctx.accounts.redemption.coin_mint;
         let id = ctx.accounts.redemption.id;
         let cost = ctx.accounts.redemption.cost;
@@ -550,24 +566,40 @@ pub mod aura_creator_coin {
         let signer_seeds: &[&[u8]] = &[b"redemption", coin_mint.as_ref(), id_bytes.as_ref(), &[bump]];
         let signer = &[signer_seeds];
 
-        let dest = if release_to_creator {
-            ctx.accounts.creator_token_account.to_account_info()
-        } else {
-            ctx.accounts.buyer_token_account.to_account_info()
-        };
+        // Compute split amounts with checked math
+        let to_creator = (cost as u128)
+            .checked_mul(creator_share_bps as u128).ok_or(RedemptionError::Overflow)?
+            .checked_div(10_000).ok_or(RedemptionError::Overflow)? as u64;
+        let to_buyer = cost.checked_sub(to_creator).ok_or(RedemptionError::Overflow)?;
 
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.escrow_token_account.to_account_info(),
-                    to: dest,
-                    authority: ctx.accounts.redemption.to_account_info(),
-                },
-                signer,
-            ),
-            cost,
-        )?;
+        if to_creator > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.escrow_token_account.to_account_info(),
+                        to: ctx.accounts.creator_token_account.to_account_info(),
+                        authority: ctx.accounts.redemption.to_account_info(),
+                    },
+                    signer,
+                ),
+                to_creator,
+            )?;
+        }
+        if to_buyer > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.escrow_token_account.to_account_info(),
+                        to: ctx.accounts.buyer_token_account.to_account_info(),
+                        authority: ctx.accounts.redemption.to_account_info(),
+                    },
+                    signer,
+                ),
+                to_buyer,
+            )?;
+        }
 
         let r = &mut ctx.accounts.redemption;
         r.status = RedemptionStatus::Confirmed;
@@ -777,6 +809,10 @@ pub struct CreateCreatorCoin<'info> {
     #[account(init, payer = creator, mint::decimals = 9, mint::authority = creator_coin,
         seeds = [b"creator_coin_mint", creator.key().as_ref()], bump)]
     pub creator_coin_mint: Account<'info, Mint>,
+    // [audit fix H-9] init benefits_list atomically with the coin so it cannot be frontrun
+    #[account(init, payer = creator, space = BenefitsList::MAX_SIZE,
+        seeds = [b"benefits", creator_coin_mint.key().as_ref()], bump)]
+    pub benefits_list: Account<'info, BenefitsList>,
     #[account(mut)]
     pub creator_token_account: Account<'info, TokenAccount>,
     #[account(seeds = [b"user", creator.key().as_ref()], bump = creator_profile.bump,
@@ -1047,8 +1083,8 @@ pub const PROTOCOL_AUTHORITY: Pubkey = anchor_lang::solana_program::system_progr
 // Gift context
 #[derive(Accounts)]
 pub struct GiftCreatorCoinCtx<'info> {
-    /// CHECK: Coin mint
-    pub coin_mint: AccountInfo<'info>,
+    // [audit fix M-1] strongly typed Mint instead of bare AccountInfo
+    pub coin_mint: Account<'info, Mint>,
     #[account(mut, constraint = sender_token_account.mint == coin_mint.key() @ GiftError::MintMismatch,
         constraint = sender_token_account.owner == sender.key() @ GiftError::Unauthorized)]
     pub sender_token_account: Account<'info, TokenAccount>,

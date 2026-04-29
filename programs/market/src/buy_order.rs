@@ -32,7 +32,17 @@ impl BuyOrder {
 #[event]
 pub struct BuyOrderPlaced { pub id: u64, pub coin_mint: Pubkey, pub buyer: Pubkey, pub amount_wanted: u64, pub price_per_coin_lamports: u64, pub ora_locked: u64, pub slot: u64 }
 #[event]
-pub struct BuyOrderFilled { pub id: u64, pub seller: Pubkey, pub fill_amount: u64, pub total_cost: u64, pub fee: u64, pub slot: u64 }
+pub struct BuyOrderFilled {
+    pub id: u64,
+    pub seller: Pubkey,
+    pub fill_amount: u64,
+    pub total_cost: u64,
+    pub fee: u64,
+    /// [audit fix M-6] true when this fill closed out the order; false on partial fill
+    pub fully_filled: bool,
+    pub remaining_after: u64,
+    pub slot: u64,
+}
 #[event]
 pub struct BuyOrderCancelled { pub id: u64, pub buyer: Pubkey, pub ora_returned: u64, pub slot: u64 }
 

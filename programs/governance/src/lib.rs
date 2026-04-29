@@ -101,7 +101,12 @@ pub mod aura_governance {
         Ok(())
     }
 
+    /// ⚠️ [audit fix C-23] DEPRECATED — superseded by `file_arbitration_dispute` (§13.8 two-trial system).
+    /// This legacy 4-vote dispute path is retained only for backward compatibility with existing
+    /// indexer references and will be removed in a future release. New disputes MUST go through
+    /// the ArbitrationDispute path.
     pub fn create_dispute(ctx: Context<CreateDispute>, evidence_uri: String, dispute_type: DisputeType) -> Result<()> {
+        msg!("[DEPRECATED] create_dispute: use file_arbitration_dispute instead.");
         require!(evidence_uri.len() <= 200, ErrorCode::EvidenceUriTooLong);
         let d = &mut ctx.accounts.dispute;
         d.plaintiff = ctx.accounts.plaintiff.key(); d.target_user = ctx.accounts.target_user.key();
@@ -111,7 +116,11 @@ pub mod aura_governance {
         Ok(())
     }
 
+    /// ⚠️ [audit fix C-23] DEPRECATED — superseded by Arbitration Trial 1/2 jury voting (§13.8).
+    /// Retained for backward compatibility; new disputes MUST go through `submit_trial1_ruling` /
+    /// `submit_trial2_ruling`.
     pub fn vote_on_dispute(ctx: Context<VoteOnDispute>, vote_guilty: bool) -> Result<()> {
+        msg!("[DEPRECATED] vote_on_dispute: use submit_trial1_ruling / submit_trial2_ruling.");
         require!(ctx.accounts.arbiter_record.is_active, ErrorCode::ArbiterNotActive);
         let arbiter_key = ctx.accounts.arbiter.key();
         let dispute_key = ctx.accounts.dispute.key();

@@ -227,7 +227,9 @@ pub mod aura_market {
         if so.amount_remaining == 0 { so.status = OrderStatus::Filled; }
 
         let slot = Clock::get()?.slot;
-        emit!(SellOrderFilled { id, buyer: ctx.accounts.buyer.key(), fill_amount: actual_fill, total_cost, fee: fee_total, slot });
+        let remaining_after = so.amount_remaining;
+        let fully_filled = remaining_after == 0;
+        emit!(SellOrderFilled { id, buyer: ctx.accounts.buyer.key(), fill_amount: actual_fill, total_cost, fee: fee_total, fully_filled, remaining_after, slot });
         Ok(())
     }
 
@@ -274,13 +276,16 @@ pub mod aura_market {
         let bump = ctx.accounts.buy_order.bump;
         let ora_locked = ctx.accounts.buy_order.ora_locked_lamports;
         let amount_filled = ctx.accounts.buy_order.amount_filled;
-        let amount_wanted = ctx.accounts.buy_order.amount_wanted;
+        let price = ctx.accounts.buy_order.price_per_coin_lamports;
         require!(ctx.accounts.buy_order.status == OrderStatus::Open, BuyOrderError::OrderNotOpen);
 
-        let filled_bps = if amount_wanted > 0 {
-            (amount_filled as u128).checked_mul(10_000).unwrap_or(0).checked_div(amount_wanted as u128).unwrap_or(0) as u64
-        } else { 0 };
-        let used = ora_locked.checked_mul(filled_bps).unwrap_or(0) / 10_000;
+        // [audit fix M-3] precise refund: actual cost = filled_amount × price × 1.05,
+        // not a percentage approximation that loses precision on rounding.
+        let used_base = (amount_filled as u128)
+            .checked_mul(price as u128).ok_or(BuyOrderError::Overflow)?
+            .checked_div(1_000_000_000).ok_or(BuyOrderError::Overflow)? as u64;
+        let used = used_base
+            .checked_mul(10_500).ok_or(BuyOrderError::Overflow)? / 10_000;
         let ora_to_return = ora_locked.saturating_sub(used);
 
         let id_bytes = id.to_le_bytes();
@@ -379,7 +384,9 @@ pub mod aura_market {
         if bo.amount_filled >= bo.amount_wanted { bo.status = OrderStatus::Filled; }
 
         let slot = Clock::get()?.slot;
-        emit!(BuyOrderFilled { id, seller: ctx.accounts.seller.key(), fill_amount: actual_fill, total_cost, fee: fee_total, slot });
+        let remaining_after = bo.amount_wanted.saturating_sub(bo.amount_filled);
+        let fully_filled = bo.amount_filled >= bo.amount_wanted;
+        emit!(BuyOrderFilled { id, seller: ctx.accounts.seller.key(), fill_amount: actual_fill, total_cost, fee: fee_total, fully_filled, remaining_after, slot });
         Ok(())
     }
 }
