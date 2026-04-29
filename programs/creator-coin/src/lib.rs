@@ -197,6 +197,9 @@ pub mod aura_creator_coin {
     }
 
     /// Fill a sell order
+    /// [audit fix C-16] fee split now matches whitepaper §5.6
+    /// (2% burn + 2% staking + 0.5% gas + 0.5% ops). Old 50/50 burn/creator split
+    /// violated the whitepaper and has been removed.
     pub fn fill_order(ctx: Context<FillOrder>, fill_amount: u64) -> Result<()> {
         let order = &mut ctx.accounts.order;
         require!(order.is_active, ErrorCode::OrderNotActive);
@@ -210,49 +213,52 @@ pub mod aura_creator_coin {
             .checked_mul(order.price_per_token as u128).ok_or(ErrorCode::Overflow)?
             .checked_div(1_000_000_000).ok_or(ErrorCode::Overflow)? as u64;
 
-        let total_fee = total_cost.checked_mul(TRADING_FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
-        let creator_fee = total_fee / 2;
-        let burn_fee = total_fee - creator_fee;
+        // [audit fix C-16] correct §5.6 fee split
+        let total_fee = total_cost.checked_mul(500).ok_or(ErrorCode::Overflow)? / 10_000; // 5%
+        let burn_fee = total_cost.checked_mul(200).ok_or(ErrorCode::Overflow)? / 10_000; // 2%
+        let staking_fee = total_cost.checked_mul(200).ok_or(ErrorCode::Overflow)? / 10_000; // 2%
+        let gas_fee = total_cost.checked_mul(50).ok_or(ErrorCode::Overflow)? / 10_000; // 0.5%
+        let ops_fee = total_fee
+            .saturating_sub(burn_fee).saturating_sub(staking_fee).saturating_sub(gas_fee);
         let seller_receives = total_cost.checked_sub(total_fee).ok_or(ErrorCode::Overflow)?;
 
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.buyer_ora_account.to_account_info(),
-                    to: ctx.accounts.seller_ora_account.to_account_info(),
-                    authority: ctx.accounts.buyer.to_account_info(),
-                },
-            ),
-            seller_receives,
-        )?;
-
-        if creator_fee > 0 {
-            token::transfer(
-                CpiContext::new(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.buyer_ora_account.to_account_info(),
-                        to: ctx.accounts.creator_ora_account.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                creator_fee,
-            )?;
-        }
-
+        // 95% → seller
+        token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), Transfer {
+            from: ctx.accounts.buyer_ora_account.to_account_info(),
+            to: ctx.accounts.seller_ora_account.to_account_info(),
+            authority: ctx.accounts.buyer.to_account_info(),
+        }), seller_receives)?;
+        // 2% burn
         if burn_fee > 0 {
-            token::burn(
-                CpiContext::new(
-                    ctx.accounts.token_program.to_account_info(),
-                    Burn {
-                        mint: ctx.accounts.ora_mint.to_account_info(),
-                        from: ctx.accounts.buyer_ora_account.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                burn_fee,
-            )?;
+            token::burn(CpiContext::new(ctx.accounts.token_program.to_account_info(), Burn {
+                mint: ctx.accounts.ora_mint.to_account_info(),
+                from: ctx.accounts.buyer_ora_account.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            }), burn_fee)?;
+        }
+        // 2% staking
+        if staking_fee > 0 {
+            token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), Transfer {
+                from: ctx.accounts.buyer_ora_account.to_account_info(),
+                to: ctx.accounts.staking_pool_account.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            }), staking_fee)?;
+        }
+        // 0.5% gas reserve
+        if gas_fee > 0 {
+            token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), Transfer {
+                from: ctx.accounts.buyer_ora_account.to_account_info(),
+                to: ctx.accounts.gas_reserve_account.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            }), gas_fee)?;
+        }
+        // 0.5% ops
+        if ops_fee > 0 {
+            token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), Transfer {
+                from: ctx.accounts.buyer_ora_account.to_account_info(),
+                to: ctx.accounts.ops_treasury_account.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            }), ops_fee)?;
         }
 
         let creator_key = ctx.accounts.creator_coin.creator;
@@ -278,7 +284,7 @@ pub mod aura_creator_coin {
 
         let coin = &mut ctx.accounts.creator_coin;
         coin.total_trading_volume = coin.total_trading_volume.checked_add(total_cost).ok_or(ErrorCode::Overflow)?;
-        coin.total_fees_earned = coin.total_fees_earned.checked_add(creator_fee).ok_or(ErrorCode::Overflow)?;
+        coin.total_fees_earned = coin.total_fees_earned.checked_add(total_fee).ok_or(ErrorCode::Overflow)?;
         Ok(())
     }
 
@@ -608,6 +614,13 @@ pub mod aura_creator_coin {
         let creator_key = ctx.accounts.creator_coin.creator;
         let coin_bump = ctx.accounts.creator_coin.bump;
 
+        // [audit fix C-8/C-9] enforce hard 10,000 supply cap
+        let new_circulating = ctx.accounts.creator_coin.circulating_supply
+            .checked_add(amount).ok_or(ErrorCode::Overflow)?;
+        let max_unlocked = ctx.accounts.creator_coin.total_supply
+            .checked_sub(ctx.accounts.creator_coin.locked_supply).ok_or(ErrorCode::Overflow)?;
+        require!(new_circulating <= max_unlocked, ErrorCode::FullyUnlocked);
+
         // Calculate gross cost
         let gross_ora = (amount as u128).checked_mul(price as u128).ok_or(ErrorCode::Overflow)?
             .checked_div(1_000_000_000).ok_or(ErrorCode::Overflow)? as u64;
@@ -670,14 +683,24 @@ pub mod aura_creator_coin {
             authority: ctx.accounts.creator_coin.to_account_info(),
         }, signer), amount)?;
 
+        // [audit fix C-9] update circulating_supply tracking
+        let coin_mint = ctx.accounts.creator_coin.mint;
+        let buyer_key = ctx.accounts.buyer.key();
+        {
+            let coin = &mut ctx.accounts.creator_coin;
+            coin.circulating_supply = new_circulating;
+            coin.total_trading_volume = coin.total_trading_volume
+                .checked_add(gross_ora).ok_or(ErrorCode::Overflow)?;
+        }
+
         // Update burn tracker (#11)
         let bt = &mut ctx.accounts.burn_tracker;
         bt.total_burned_lamports = bt.total_burned_lamports.checked_add(burn_amt as u128).ok_or(ErrorCode::Overflow)?;
         bt.last_updated_slot = Clock::get()?.slot;
 
         let slot = Clock::get()?.slot;
-        emit!(PrimaryIssuanceBuy { coin: ctx.accounts.creator_coin.mint, buyer: ctx.accounts.buyer.key(), amount, price, fee: fee_total, slot });
-        emit!(BurnExecuted { amount: burn_amt, source: ctx.accounts.buyer.key(), slot });
+        emit!(PrimaryIssuanceBuy { coin: coin_mint, buyer: buyer_key, amount, price, fee: fee_total, slot });
+        emit!(BurnExecuted { amount: burn_amt, source: buyer_key, slot });
         Ok(())
     }
 
@@ -808,16 +831,32 @@ pub struct FillOrder<'info> {
     pub order: Account<'info, Order>,
     #[account(mut)]
     pub escrow_coin_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-17] CC destination owner == buyer; mint matches creator_coin.mint
+    #[account(mut,
+        constraint = buyer_coin_account.owner == buyer.key() @ ErrorCode::Unauthorized,
+        constraint = buyer_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized
+    )]
     pub buyer_coin_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-17] buyer's ORA: owner+mint enforced
+    #[account(mut,
+        constraint = buyer_ora_account.owner == buyer.key() @ ErrorCode::Unauthorized,
+        constraint = buyer_ora_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
     pub buyer_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix C-17] seller's ORA destination MUST match order.maker
+    #[account(mut,
+        constraint = seller_ora_account.owner == order.maker @ ErrorCode::Unauthorized,
+        constraint = seller_ora_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
     pub seller_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub creator_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)]
     pub ora_mint: Account<'info, Mint>,
+    // [audit fix C-17] fee buckets locked to protocol PDAs
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
+    pub staking_pool_account: Account<'info, TokenAccount>,
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
+    pub gas_reserve_account: Account<'info, TokenAccount>,
+    #[account(mut, address = OPS_TREASURY_POOL @ ErrorCode::Unauthorized)]
+    pub ops_treasury_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
@@ -839,11 +878,16 @@ pub struct CancelOrder<'info> {
 // Benefits contexts
 #[derive(Accounts)]
 pub struct InitBenefitsListCtx<'info> {
+    // [audit fix C-18] enforce creator owns the CreatorCoin record AND coin_mint matches
+    #[account(seeds = [b"creator_coin", creator.key().as_ref()], bump = creator_coin.bump,
+        constraint = creator_coin.creator == creator.key() @ BenefitsError::Unauthorized,
+        constraint = creator_coin.mint == coin_mint.key() @ BenefitsError::Unauthorized
+    )]
+    pub creator_coin: Account<'info, CreatorCoin>,
     #[account(init, payer = creator, space = BenefitsList::MAX_SIZE,
         seeds = [b"benefits", coin_mint.key().as_ref()], bump)]
     pub benefits_list: Account<'info, BenefitsList>,
-    /// CHECK: Coin mint
-    pub coin_mint: AccountInfo<'info>,
+    pub coin_mint: Account<'info, Mint>,
     #[account(mut)]
     pub creator: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -1026,19 +1070,31 @@ pub struct PrimaryBuyCtx<'info> {
     pub creator_coin: Box<Account<'info, CreatorCoin>>,
     #[account(mut, seeds = [b"creator_coin_mint", creator_coin.creator.as_ref()], bump)]
     pub creator_coin_mint: Box<Account<'info, Mint>>,
-    #[account(mut)]
+    // [audit fix] buyer's ORA account: owner+mint enforced
+    #[account(mut,
+        constraint = buyer_ora_account.owner == buyer.key() @ ErrorCode::Unauthorized,
+        constraint = buyer_ora_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
     pub buyer_ora_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    // [audit fix C-8] creator's ORA destination MUST belong to creator_coin.creator
+    #[account(mut,
+        constraint = creator_ora_account.owner == creator_coin.creator @ ErrorCode::Unauthorized,
+        constraint = creator_ora_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
     pub creator_ora_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
     pub ora_mint: Box<Account<'info, Mint>>,
-    #[account(mut)]
+    // [audit fix] fee buckets locked to protocol PDAs
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
     pub staking_pool_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
     pub gas_reserve_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    #[account(mut, address = OPS_TREASURY_POOL @ ErrorCode::Unauthorized)]
     pub ops_treasury_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    // [audit fix] buyer's CC ATA: owner+mint enforced
+    #[account(mut,
+        constraint = buyer_cc_account.owner == buyer.key() @ ErrorCode::Unauthorized,
+        constraint = buyer_cc_account.mint == creator_coin_mint.key() @ ErrorCode::Unauthorized
+    )]
     pub buyer_cc_account: Box<Account<'info, TokenAccount>>,
     #[account(mut, seeds = [b"burn-tracker"], bump = burn_tracker.bump)]
     pub burn_tracker: Box<Account<'info, BurnTracker>>,
@@ -1046,6 +1102,12 @@ pub struct PrimaryBuyCtx<'info> {
     pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
+
+/// [audit fix C-8] Hardcoded protocol fee pools for creator-coin program.
+/// ⚠️ DO NOT DEPLOY — placeholders; replace with real protocol PDAs pre-mainnet.
+pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 // Burn Tracker context (#11)
 #[derive(Accounts)]
