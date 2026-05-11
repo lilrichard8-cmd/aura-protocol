@@ -1,59 +1,91 @@
-# Dependencies
+# ─── Dependencies ──────────────────────────────────────────────
 node_modules/
 .pnp
 .pnp.js
 
-# Testing
-coverage/
-
-# Production
+# ─── Build output ──────────────────────────────────────────────
 build/
 dist/
 .next/
+.vite/
+*.tsbuildinfo
+coverage/
 
-# Misc
-.DS_Store
-*.pem
+# ─── Rust / Anchor ─────────────────────────────────────────────
+target/
+**/*.rs.bk
+*.pdb
+.anchor/
+test-ledger/
+target/idl/
+target/types/
+
+# ─── Solana / Secrets (CRITICAL — never commit private keys) ───
+# Specific keypair files we know about.
+deploy-keypair.json
+aura_deploy-keypair.json
+**/keypair*.json
+**/*-keypair.json
+**/wallet*.json
+# Environment files
 .env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
+*.pem
 
-# Debug
+# ─── Cache / OS ────────────────────────────────────────────────
+.DS_Store
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Rust
-target/
-**/*.rs.bk
-*.pdb
-
-# Anchor
-.anchor/
-test-ledger/
-.DS_Store
-
-# IDL
-target/idl/
-target/types/
-
-# Keys (NEVER commit private keys)
-*.json
-!package.json
-!tsconfig.json
-!tailwind.config.js
-!postcss.config.js
-
-# Vercel
-.vercel
-
-# VSCode
+# ─── Editors ───────────────────────────────────────────────────
 .vscode/
-
-# IDE
 .idea/
 *.swp
 *.swo
 *~
+
+# ─── Vercel ────────────────────────────────────────────────────
+.vercel
+
+# ─── Demo video renders (large mp4s, kept locally only) ───────
+demo-video/aura-demo/out/
+demo-video/aura-demo/.cache/
+*.mp4
+*.mov
+# Keep one seed/demo video shipped with the frontend so the feed has
+# a default video to play.
+!aura-mainstream/public/seed-media/**/*.mp4
+!aura-mainstream/public/seed-media/**/*.mov
+
+# ─── Misc cleanup ──────────────────────────────────────────────
+programs_backup_*/
+*.bak-*
+*.bak
+
+# ─── Stale subprojects (not part of monorepo) ─────────────────
+vite-app/
+iris-chat/
+programs_backup_*/
+
+# ─── Media (Colosseum submission: skeleton-only repo) ─────────
+# Seed audio / video / cover art kept locally; binary assets not in repo.
+**/public/seed-media/
+**/public/content/
+**/public/judge-avatar.jpg
+**/public/iris-avatar.jpg
+**/public/aura-logo.png
+**/public/aura-logo-transparent.png
+*.mp3
+*.wav
+*.mp4
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.svg
+# Exception: small logo SVGs / inline-component icons if any

@@ -1,0 +1,222 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* AURA custom colors outside of shadcn system */
+@theme {
+  --color-aura-bg: #1A1A2E;
+  --color-aura-bg-deep: #16213E;
+  --color-aura-card: #0F3460;
+  --color-aura-card-alt: #1A1A2E;
+  --color-aura-accent: #E94560;
+  --color-aura-accent-hover: #D63B55;
+  --color-aura-gold: #F59E0B;
+  --color-aura-gold-hover: #D97706;
+  --color-aura-text: #EAEAEA;
+  --color-aura-text-secondary: #A0A0A0;
+  --color-aura-border: #2A2A4A;
+  --color-aura-surface: #1E1E3A;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-spin-slow: spin-slow 4s linear infinite;
+  --animate-shimmer: shimmer 2s ease-in-out infinite;
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 20px rgba(233, 69, 96, 0.3); }
+  50% { box-shadow: 0 0 30px rgba(233, 69, 96, 0.6), 0 0 40px rgba(233, 69, 96, 0.3); }
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* Always dark — AURA After Dark has no light mode */
+:root {
+  --radius: 0.625rem;
+  --background: #1A1A2E;
+  --foreground: #EAEAEA;
+  --card: #0F3460;
+  --card-foreground: #EAEAEA;
+  --popover: #16213E;
+  --popover-foreground: #EAEAEA;
+  --primary: #E94560;
+  --primary-foreground: #FFFFFF;
+  --secondary: #1E1E3A;
+  --secondary-foreground: #EAEAEA;
+  --muted: #16213E;
+  --muted-foreground: #A0A0A0;
+  --accent: #E94560;
+  --accent-foreground: #FFFFFF;
+  --destructive: #E94560;
+  --border: #2A2A4A;
+  --input: #2A2A4A;
+  --ring: #E94560;
+  --chart-1: #E94560;
+  --chart-2: #F59E0B;
+  --chart-3: #0F3460;
+  --chart-4: #6366F1;
+  --chart-5: #10B981;
+  --sidebar: #16213E;
+  --sidebar-foreground: #EAEAEA;
+  --sidebar-primary: #E94560;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #1E1E3A;
+  --sidebar-accent-foreground: #EAEAEA;
+  --sidebar-border: #2A2A4A;
+  --sidebar-ring: #E94560;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  background-color: #1A1A2E;
+  color: #EAEAEA;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #1A1A2E;
+}
+::-webkit-scrollbar-thumb {
+  background: #2A2A4A;
+  border-radius: 2px;
+}
+
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-aura-card/40 backdrop-blur-xl border border-white/10;
+  }
+  
+  .glass-card {
+    @apply bg-aura-card/30 backdrop-blur-md border border-white/5 hover:border-white/10 transition-all duration-300;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 10px rgba(233, 69, 96, 0.5);
+  }
+
+  .animate-spin-slow {
+    animation: var(--animate-spin-slow);
+  }
+
+  .animate-shimmer {
+    animation: var(--animate-shimmer);
+  }
+
+  .animate-glow {
+    animation: var(--animate-glow);
+  }
+
+  .backdrop-blur-xl {
+    backdrop-filter: blur(24px);
+  }
+
+  .backdrop-blur-2xl {
+    backdrop-filter: blur(40px);
+  }
+
+  /* Custom scrollbar for webkit browsers */
+  .scrollbar-hide {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* Internet Explorer 10+ */
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none; /* Safari and Chrome */
+  }
+
+  /* Gradient mask for fading edges */
+  .mask-linear-fade {
+    -webkit-mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+    mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-[#1A1A2E] text-white antialiased selection:bg-aura-accent/30;
+    font-feature-settings: "cv11", "ss01";
+  }
+}
