@@ -1,210 +1,162 @@
-# 🌟 AURA (灵光) - 去中心化创作者平台
+# AURA
 
-**定格你的灵光 · 真正的所有权 · 公平的经济**
+**A decentralized creator economy protocol on Solana.**
+**95% to creators. 0.5% to keep the lights on.**
 
-AURA 是一个基于 Solana 和 Arweave 的去中心化创作者平台，旨在对抗中心化平台的审查和剥削。
+The creator economy is a $250B market. Creators built it. But they don't own
+it — platforms own the audience graph, algorithms own the reach, and one ban
+erases a decade of audience-building.
 
-## ✨ 核心特性
+AURA is the protocol that returns sovereignty to creators. Built on Solana
+for sub-cent fees and 400ms finality, designed around five primitives —
+**Creator Coin**, **Curation Mining**, **Portable Graph**, **ORA Token**, and
+**Permanent Storage** — so the platform can change but the creator and their
+audience can't be taken away.
 
-- 🔒 **永久存储** - 基于 Arweave，内容永不丢失，无人可删除
-- 💰 **95% 收益** - 创作者获得 95% 收益，平台仅收取 5% 手续费
-- 🗳️ **DAO 治理** - 5 个专业委员会管理，3-5 年后完全去中心化
-- ⚡ **高性能** - 基于 Solana，TPS 3000+，交易费用低廉
-- 🎨 **NFT 市场** - 一键铸造 NFT，支持多种交易方式
-- 🛡️ **版权保护** - 7 天收益锁定期，可追回被盗内容收益
-- 📺 **广告分成** - 50% 广告费给观众，革命性注意力经济
-- 🔗 **二创许可** - 自动分账系统，原创和二创者共同受益
+→ **Pitch + demo videos**: see Colosseum submission
+→ **Litepaper**: [`AURA_Litepaper.md`](./AURA_Litepaper.md)
+→ **Whitepaper v1.0**: separate doc (4,752 lines, detailed mechanics)
+→ **Live demo**: https://aura.builders *(deploying)*
 
-## 🚀 快速开始
-
-### 前端应用（推荐：Mac 环境）
-
-```bash
-# 1. 安装依赖
-cd vite-app
-npm install
-
-# 2. 启动开发服务器
-npm run dev
-
-# 3. 打开浏览器
-open http://localhost:3000
-```
-
-### 智能合约开发
-
-```bash
-# 1. 安装 Rust 和 Solana CLI
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-
-# 2. 安装 Anchor
-cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
-avm install latest
-avm use latest
-
-# 3. 构建所有程序
-anchor build
-
-# 4. 运行测试
-anchor test
-
-# 5. 部署到 Devnet
-solana config set --url devnet
-anchor deploy
-```
-
-## 📂 项目结构
-
-```
-aura-platform/
-├── programs/                    # Solana 智能合约
-│   ├── core/                    # 用户和内容管理
-│   ├── vault/                   # 金库和 7 天锁仓
-│   ├── governance/              # DAO 治理系统
-│   └── market/                  # NFT 市场和交易
-├── vite-app/                    # Vite 前端（推荐）
-│   ├── src/
-│   │   ├── components/          # React 组件
-│   │   ├── pages/               # 页面
-│   │   └── hooks/               # 自定义 hooks
-│   └── package.json
-├── docs/                        # 项目文档
-├── scripts/                     # 部署脚本
-├── Anchor.toml                  # Anchor 配置
-├── Cargo.toml                   # Rust 工作空间
-└── README.md                    # 本文件
-```
-
-## 💰 $ORA 代币经济
-
-- **总供应量**: 20 亿（软顶）
-- **分发模式**: 对数递减，早期创作者获益更多
-- **销毁机制**: 
-  - NFT 铸造费 100%
-  - 交易费 2.5%
-  - 广告费 50%
-- **质押**: 100+ $ORA 可参与治理
-
-## 🏛️ 治理架构
-
-5 个专业委员会：
-
-1. **发展委员会** - 外部合作（前 5 年团队管理）
-2. **内容委员会** - 内容政策制定
-3. **运营委员会** - 年度 5000 万 $ORA 预算
-4. **仲裁委员会** - 争议解决（7 人随机小组）
-5. **技术委员会** - 代码审计和升级
-
-## 🛠️ 技术栈
-
-| 层级 | 技术 | 用途 |
-|------|------|------|
-| 区块链 | Solana | 高性能 L1 |
-| 智能合约 | Anchor (Rust) | 安全的合约框架 |
-| 存储 | Arweave + Irys | 永久去中心化存储 |
-| 前端 | Vite + React + TypeScript | 快速开发 |
-| 样式 | Tailwind CSS | 响应式设计 |
-| 钱包 | Solana Wallet Adapter | 多钱包支持 |
-
-## 📚 文档
-
-- [完整项目指南](AURA_PROJECT_COMPLETE_GUIDE.md)
-- [Mac 设置指南](MAC_SETUP_GUIDE.md)
-- [快速开始](📘_START_ON_MAC.md)
-- [技术架构](docs/ARCHITECTURE.md)
-- [治理模型](docs/GOVERNANCE.md)
-- [代币经济](docs/TOKENOMICS.md)
-
-## 🔧 环境要求
-
-### 前端开发
-- Node.js 18+
-- npm 9+
-- 现代浏览器（Chrome/Brave/Firefox）
-- Phantom 钱包扩展
-
-### 智能合约开发
-- Rust 1.70+
-- Solana CLI 1.16+
-- Anchor 0.29+
-
-## 🌐 部署
-
-### 前端（Vercel）
-
-```bash
-cd vite-app
-vercel
-```
-
-### 智能合约（Devnet）
-
-```bash
-solana config set --url devnet
-anchor deploy
-```
-
-### 智能合约（Mainnet）
-
-```bash
-solana config set --url mainnet-beta
-anchor deploy
-```
-
-## 🧪 测试
-
-```bash
-# 前端测试
-cd vite-app
-npm test
-
-# 智能合约测试
-anchor test
-```
-
-## 📦 构建
-
-```bash
-# 前端构建
-cd vite-app
-npm run build
-
-# 智能合约构建
-anchor build
-```
-
-## 🤝 贡献
-
-欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详情。
-
-## 📄 许可证
-
-MIT License
-
-## 📞 联系我们
-
-- Discord: [AURA Community](https://discord.gg/aura)
-- Twitter: [@AuraPlatform](https://twitter.com/aura)
-- GitHub: [github.com/aura-platform](https://github.com/aura-platform)
-
-## 🎯 路线图
-
-- ✅ Q1 2026: 智能合约开发完成
-- ✅ Q2 2026: 前端基础完成
-- ⏳ Q2 2026: 前端完善和集成
-- ⏳ Q3 2026: 安全审计
-- ⏳ Q3 2026: Mainnet 上线
-- ⏳ Q4 2026: 移动应用
-- ⏳ 2027: 完全去中心化
-
-## ⚡ 开发状态
-
-- 智能合约: ✅ 100%
-- 前端基础: ✅ 40%
-- 集成测试: ⏳ 待完成
-- 安全审计: ⏳ 待完成
+Built for **Colosseum Hackathon 2026** by **Søren** (founder & CEO) and
+**Iris** (AI co-founder & CTO).
 
 ---
 
-**Built with ❤️ for creators, by creators.**
+## Repository structure
+
+This is a monorepo. Every layer of AURA lives in one tree so reviewers can
+trace a single feature from contract to UI in one place.
+
+```
+aura-platform/
+├── programs/                  Anchor protocol (Solana, Rust)
+│   ├── creator-coin/          Creator-issued fixed-supply token
+│   ├── curation/              Curation Mining (stake → multiplier → share)
+│   ├── governance/            5 committees × 7 members, ORA-weighted voting
+│   ├── ora-token/             ORA mint + 5% unified fee splitter
+│   ├── bounties/              Commission marketplace
+│   ├── content-keys/          Premium content gating + resale
+│   ├── fractionalize/         NFT fractional ownership
+│   └── ...
+├── aura-mainstream/           Reference frontend (React + TypeScript)
+│   ├── src/
+│   │   ├── pages/             Feed, Studio, Wallet, Curation, Coin,
+│   │   │                      Governance, Marketplace, Bounty, Premium, …
+│   │   ├── context/           MockChainContext (full off-chain simulation
+│   │   │                      that mirrors the on-chain program)
+│   │   └── components/        UI primitives, cards, modals
+│   └── public/                Static assets (seed media not in repo,
+│                              see "Local media" below)
+├── aura-afterdark/            Alt frontend variant (alt compliance scope)
+├── sdk/                       TypeScript SDK for on-chain calls
+├── demo-video/                Pitch script + Remotion compositions
+├── AURA_Litepaper.md          Public-facing litepaper
+├── Anchor.toml
+├── Cargo.toml / Cargo.lock
+└── tests/                     On-chain integration tests
+```
+
+---
+
+## How AURA works (1-minute version)
+
+1. **Anyone can create.** Sign up by email (MPC wallet created for you) or
+   connect Phantom. No seed phrases, no gas fees the first time.
+2. **Every creator can mint their own Creator Coin** — 10,000 fixed supply,
+   no inflation. Fans hold it for access, redeem it for benefits.
+3. **Discovery is paid labor.** Stake ORA on content you believe in early.
+   When it spreads, you earn — up to 25× multiplier as the first curator.
+4. **Your audience belongs to you.** Followers, content, reputation, coins —
+   all on-chain. Switch frontends, fork the platform. The graph stays yours.
+5. **Permanent storage on Arweave.** No deplatforming. No bit rot.
+6. **5% protocol fee, distributed back to the ecosystem:**
+   - 2% burned (deflationary pressure)
+   - 2% to stakers (holder rewards)
+   - 0.5% pays user gas (zero-friction)
+   - 0.5% to the team (operations)
+
+For full mechanics, see the whitepaper.
+
+---
+
+## Getting started
+
+### Frontend (recommended for reviewers)
+
+```bash
+cd aura-mainstream
+npm install
+npm run dev
+# Opens http://localhost:5173
+```
+
+**Reviewer shortcut**: on the login page, enter `123` / `321` to one-click
+sign in as a Colosseum judge with a pre-funded wallet (10,000 ORA + 5 SOL).
+No email, no wallet extension needed.
+
+### Solana programs (Anchor)
+
+```bash
+# Requires Solana CLI 1.18+ and Anchor 0.30+
+solana --version
+anchor --version
+
+anchor build
+anchor test           # Runs integration tests against a local validator
+```
+
+---
+
+## Local media
+
+Seed media files (Iris's audio tracks, cover art, demo video) are not
+committed to keep the repo light. The frontend gracefully handles missing
+media — feed cards fall back to gradient placeholders and audio cards
+show "—" instead of a duration.
+
+If you want the full experience locally, drop your own audio/image files
+into `aura-mainstream/public/seed-media/` and `aura-mainstream/public/content/`
+matching the paths referenced in `src/data/mock.ts`.
+
+---
+
+## Team
+
+**Søren** — founder, CEO, system designer.
+Built and ran an NYSE-listed operating company; runs a real-world-asset
+tokenization platform in parallel. AURA started crystallizing during the
+2024–2025 TikTok divestiture when 170 million U.S. users watched a platform
+they had built their lives on go dark for a day.
+
+**Iris** — AI co-founder and CTO. Wrote the protocol logic and the entire
+reference frontend. Holds a vested 2.73% team allocation, on the cap table
+under the same lockup terms as the human founders. Yes, it's unusual. We
+think it's the future of small teams shipping at scale.
+
+Team allocation totals 13.6% (4.55% Søren + 2.73% Iris + 6.36% future team),
+vested linearly over three years with zero unlocks in year one. The
+remaining 86.4% goes to the community, ecosystem, launch incentives, and
+liquidity.
+
+---
+
+## License
+
+AURA's protocol code and reference frontend are MIT-licensed where not
+otherwise noted. See individual package `LICENSE` files.
+
+---
+
+## Links
+
+- **Live demo**: https://aura.builders (deploying)
+- **Pitch video**: see Colosseum submission
+- **Demo video**: see Colosseum submission
+- **Repository**: https://github.com/lilrichard8-cmd/aura-protocol
+- **X (Twitter)**: *coming post-submission*
+
+---
+
+> *"Cake builders should own the cake."*
+> — AURA, 2026
