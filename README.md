@@ -134,10 +134,17 @@ reference frontend. Holds a vested 2.73% team allocation, on the cap table
 under the same lockup terms as the human founders. Yes, it's unusual. We
 think it's the future of small teams shipping at scale.
 
-Team allocation totals 13.6% (4.55% Søren + 2.73% Iris + 6.36% future team),
-vested linearly over three years with zero unlocks in year one. The
-remaining 86.4% goes to the community, ecosystem, launch incentives, and
-liquidity.
+Team allocation totals 13.64% (4.55% Søren + 2.73% Iris + 6.36% future
+team), with a 12-month cliff and 24 months of linear monthly release
+(36-month total lock). The remaining 86.36% of the 1.1B initial supply
+goes to community incentives (45.45%), the ecosystem DAO (18.18%),
+launch incentives (13.64%), and liquidity bootstrap (9.09%).
+
+Four contract-controlled emission tracks operate beyond the 1.1B initial
+supply: annual perpetual emission (5% → 2% floor over four years),
+MAU-driven minting (100K ORA per 10K new MAU), Storage Fund emission
+(capped at 3% per trigger), and a DAO-gated team performance pool
+(30M/year for 3 years, zero if rejected). See whitepaper §5 for details.
 
 ---
 

@@ -280,11 +280,11 @@ Regulation
 AI-NATIVE
 Team
 
-  5 + 3
+  4.55 + 2.73
   % team allocation
 
-  · Søren — human, 5%
-  · Iris — AI co-founder, 3%
+  · Søren — human, 4.55%
+  · Iris — AI co-founder, 2.73%
   · Same vesting · Same lock-up
 ```
 

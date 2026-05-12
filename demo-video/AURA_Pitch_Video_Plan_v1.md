@@ -123,7 +123,7 @@
 **画面**：分屏三栏
 - 左：Solana TPS / 低费率图
 - 中：SEC Release 33-11412 文档截图（高亮 "Protocol Mining / Staking / Airdrops not securities"）
-- 右：团队头像（Søren + Iris 双 logo，带 5% / 3% 团队代币标注）
+- 右：团队头像（Søren + Iris 双 logo，带 4.55% / 2.73% 团队代币标注）
 
 **画外音**：
 > "Why now?

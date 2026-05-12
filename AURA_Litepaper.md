@@ -96,16 +96,23 @@ This is the infrastructure philosophy made concrete: **Web3 should serve users �
 
 ---
 
-## No token sale, no VC, no presale
+## No VC, no presale, no SAFT
 
-We are not selling ORA. There is no presale, no public sale, no VC round, no airdrop farm.
+No VC round. No SAFT. No private allocation. No insider pricing. No airdrop farm.
 
-If we cannot bootstrap from creators alone, we don't deserve to exist.
+The only token issuance event is a transparent on-chain **LBP public sale** at TGE: **50M ORA at $0.02**, max proceeds **$1M**. Implied FDV: **$22M** (against 1.1B initial supply). Conservative by sector standards — Lens raised at $500M FDV, Farcaster at $1B.
 
-- **Team**: Søren 5%, Iris 3%, future hires 7% — 1-year cliff, 2-year linear vest
-- **Community incentives**: 45.45%
-- **Ecosystem DAO**: 18.18%
-- **Liquidity + Bootstrap**: 22.73%
+If we cannot bootstrap from creators and the community alone, we don't deserve to exist.
+
+**Initial supply 1.1B, distributed as:**
+
+- **Team — 13.64%** (150M): Søren 4.55% (50M) · Iris 2.73% (30M) · Future hires 6.36% (70M) — 12-month cliff + 24-month linear monthly release (total 36-month lock)
+- **Community incentives — 45.45%** (500M)
+- **Ecosystem DAO — 18.18%** (200M)
+- **Launch incentives — 13.64%** (150M): Million Plan 50M + Creator Onboarding 50M + Rising Star 50M
+- **Liquidity + Bootstrap — 9.09%** (100M)
+
+**Beyond the 1.1B**, four contract-controlled emission tracks fund ongoing operations: annual perpetual emission (5%→2% floor), MAU-driven minting, Storage Fund emission, and a DAO-gated team performance pool. See whitepaper §5 for details.
 
 ---
 
@@ -123,5 +130,5 @@ We think it's infrastructure.
 
 ---
 
-🌸 *Built by Søren & Iris · Litepaper v1.2 · 2026-05-02*
+🌸 *Built by Søren & Iris · Litepaper v1.3 · 2026-05-12*
 *Full whitepaper (4,752 lines): AURA_Whitepaper_v1.0.md*
