@@ -81,23 +81,29 @@ function Layout({ children }: { children: React.ReactNode }) {
   
   const hideNavOnMobile = location.pathname.startsWith('/post/') || location.pathname.startsWith('/chat/');
 
+  // Breakpoint policy: desktop layout (SideNav + content padding) kicks in
+  // at the Tailwind `lg` breakpoint (1024px) instead of `md` (768px).
+  // Otherwise iPads in portrait sit exactly at 768px and the previous
+  // `md:hidden` rule shipped them the mobile UI, which both confused users
+  // ("this looks like the phone version") and hid the DM entry that only
+  // lives in BottomNav. iPad portrait → mobile, iPad landscape → desktop.
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="hidden md:block">
+      <div className="hidden lg:block">
         <SideNav />
       </div>
-      <div className="block md:hidden">
+      <div className="block lg:hidden">
         <Header />
       </div>
       <div className={`transition-all duration-300 ${
-        collapsed ? 'md:ml-16' : 'md:ml-64'
+        collapsed ? 'lg:ml-16' : 'lg:ml-64'
       }`}>
         {children}
       </div>
 
       <InstallPWA />
       {!hideNavOnMobile && (
-        <div className="block md:hidden">
+        <div className="block lg:hidden">
           <BottomNav />
         </div>
       )}

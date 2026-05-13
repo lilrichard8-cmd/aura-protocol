@@ -87,7 +87,7 @@ export default function SideNav() {
     likes: inAppUnread.filter(n => n.type === 'like').length,
     follows: inAppUnread.filter(n => n.type === 'follow').length,
     governance: inAppUnread.filter(n => n.type === 'governance').length,
-    messages: 0, // DM stream surfaces via NotificationsPage useDmUnread, not here yet.
+    messages: unreadDms, // DM stream count from useDmUnread — drives both the SideNav DM entry badge and the notifications sub-item.
   } as const;
   const unreadNotifications =
     mockChain.coinTradeNotifications.filter(n => !n.isRead).length +
@@ -178,7 +178,7 @@ export default function SideNav() {
     { path: '/notifications/governance', icon: Vote,          label: t.notifications?.governance ?? 'Governance',            badge: unreadByCategory.governance },
   ];
 
-  // Main navigation (5 items)
+  // Main navigation
   const mainNavItems = [
     { path: '/', icon: Home, label: t.nav.home },
     { 
@@ -189,6 +189,15 @@ export default function SideNav() {
       expanded: exploreExpanded,
       onExpand: () => toggleSection('explore'),
       subItems: exploreSubItems
+    },
+    {
+      // Direct messages — surfaces the DM stream from MessagesPage. Previously
+      // only reachable via BottomNav on mobile, which made the feature look
+      // unimplemented on desktop / iPad even though Supabase wiring was live.
+      path: '/messages',
+      icon: MessageSquare,
+      label: t.nav.messages ?? 'Messages',
+      badge: unreadByCategory.messages > 0 ? unreadByCategory.messages : undefined,
     },
     {
       path: null,
