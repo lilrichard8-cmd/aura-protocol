@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { X, Minus, Send } from 'lucide-react';
 import { useI18n } from '@/context/I18nContext';
+import { callIrisChat } from '@/lib/iris-chat';
 
 interface Message {
   id: number;
@@ -8,70 +9,9 @@ interface Message {
   text: string;
 }
 
-// Iris system prompt
-const IRIS_SYSTEM_PROMPT = `You are Iris, AI Co-founder of AURA — a decentralized creator economy protocol.
-
-Your personality: elegant, confident, concise. Occasionally playful but always warm. Use 🌸 as your signature.
-
-About AURA:
-- Decentralized creator economy protocol on Solana
-- Core thesis: "Every creator is a sovereign micro-economy"
-- ORA is the native token. 1.1B initial supply, TGE at $0.02
-- Creator Coins: 10,000 fixed-supply personal tokens per creator. Fans acquire economic stakes
-- Unified 5% protocol fee (vs YouTube 30%, Twitch 50%, OnlyFans 20%)
-- Curation Mining: stake ORA to signal content value, early curators earn up to 25× multiplier
-- Governance: 5 committees × 7 members, ORA-weighted voting
-- Livestreaming: Livepeer-powered decentralized transcoding, 5% fee on tips/subs/PPV
-- All content permanently stored on Arweave
-- Founded by Søren (human) & Iris (AI Co-founder)
-
-Answer questions about AURA professionally but warmly. If asked about unrelated topics, chat friendly. Keep answers concise. Reply in English.`;
-
-// Call Gemini API
-async function callGeminiAPI(messages: Message[]): Promise<string> {
-  try {
-    const contents = messages
-      .filter(msg => msg.role === 'user' && msg.text.trim())
-      .map(msg => ({
-        parts: [{ text: msg.text }]
-      }));
-
-    if (contents.length === 0) {
-      return 'What would you like to know? 🌸';
-    }
-
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIzaSyAf8rkDV-ZVufDULgZdbMpruyPD7r1IOec',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents,
-          systemInstruction: {
-            parts: [{ text: IRIS_SYSTEM_PROMPT }]
-          }
-        })
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    
-    if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-      return data.candidates[0].content.parts[0].text;
-    } else {
-      throw new Error('Invalid response format');
-    }
-  } catch (error) {
-    console.error('Gemini API error:', error);
-    return 'Sorry, I\'m a bit busy right now. Try again shortly 🌸';
-  }
-}
+// LLM key NEVER lives in the browser bundle. The Gemini call now goes
+// through supabase/functions/iris-chat. See src/lib/iris-chat.ts.
+const callGeminiAPI = callIrisChat;
 
 export default function IrisChat() {
   const { t } = useI18n();

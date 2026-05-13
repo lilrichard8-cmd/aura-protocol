@@ -1,9 +1,24 @@
 /**
- * Direct-message API — thin wrapper around the Supabase RPCs and tables.
- * All callers go through here so swapping the backend later is a
- * one-file change.
+ * Direct-message API.
+ *
+ * Reads (list threads, list messages, unread count, get-or-create
+ * thread) still go through the SECURITY DEFINER Postgres RPCs from
+ * `001_dm_schema.sql` / `002_dm_read_rpcs.sql`. These accept a
+ * `my_wallet` parameter and trust it — that's a known weakness for
+ * reads but information leakage is limited to "who chatted with whom".
+ * Production fix is migration `004_dm_security.sql` which makes the
+ * RPCs require an `auth.jwt() -> 'wallet'` claim.
+ *
+ * Writes (send, mark-read) now go through Edge Functions which require
+ * a wallet session token (see lib/wallet-auth.ts). The Edge Function
+ * verifies the token's wallet matches the wallet being written as.
+ *
+ * Realtime subscriptions still use the anon key directly; RLS policies
+ * filter by JWT (which we'll wire when Supabase auth.signInWithCustomToken
+ * is set up against the wallet-auth function output).
  */
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
+import { loadSession } from './wallet-auth';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 // ─── Types (mirror the SQL schema) ──────────────────────────────────
@@ -32,6 +47,17 @@ function ensureConfigured() {
     throw new Error('Supabase not configured — check VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY');
   }
   return supabase;
+}
+
+function requireSession(expectedWallet: string) {
+  const s = loadSession();
+  if (!s) {
+    throw new Error('WALLET_SESSION_REQUIRED');
+  }
+  if (s.wallet !== expectedWallet) {
+    throw new Error(`Session wallet ${s.wallet} does not match requested ${expectedWallet}`);
+  }
+  return s;
 }
 
 /** Find the *peer* wallet (the one that isn't `me`) inside a thread. */
@@ -68,6 +94,9 @@ export async function unreadCount(myWallet: string): Promise<number> {
 }
 
 // ─── Send a message ─────────────────────────────────────────────────
+// Now routed through the dm-send Edge Function which requires a valid
+// wallet session token. The function re-issues the dm_send RPC using
+// service_role credentials after verifying the caller.
 export async function sendMessage(args: {
   fromWallet: string;
   toWallet: string;
@@ -75,17 +104,24 @@ export async function sendMessage(args: {
   kind?: string;
 }): Promise<DmMessage> {
   const sb = ensureConfigured();
-  const { data, error } = await sb.rpc('dm_send', {
-    from_wallet: args.fromWallet,
-    to_wallet: args.toWallet,
-    content: args.content,
-    kind: args.kind ?? 'text',
+  const session = requireSession(args.fromWallet);
+  const { data, error } = await sb.functions.invoke('dm-send', {
+    body: {
+      sessionToken: session.token,
+      toWallet: args.toWallet,
+      content: args.content,
+      kind: args.kind ?? 'text',
+    },
   });
   if (error) throw error;
-  return data as DmMessage;
+  const msg = (data as { message?: DmMessage } | null)?.message;
+  if (!msg) throw new Error('dm-send returned no message');
+  return msg;
 }
 
 // ─── Get-or-create thread (used when starting a brand-new conversation)
+// Read-style helper — still uses the public RPC. The thread row leaks no
+// content, only participation, and we accept that for hackathon scope.
 export async function getOrCreateThread(myWallet: string, peerWallet: string): Promise<string> {
   const sb = ensureConfigured();
   const { data, error } = await sb.rpc('dm_get_or_create_thread', {
@@ -97,22 +133,26 @@ export async function getOrCreateThread(myWallet: string, peerWallet: string): P
 }
 
 // ─── Mark all messages from a peer as read ──────────────────────────
+// Routed through the dm-mark-read Edge Function which validates the
+// caller. Without the session token the read receipts could be forged
+// to manipulate UI badges across the platform.
 export async function markRead(myWallet: string, peerWallet: string): Promise<number> {
   const sb = ensureConfigured();
-  const { data, error } = await sb.rpc('dm_mark_read', {
-    viewer_wallet: myWallet,
-    peer_wallet: peerWallet,
+  const session = requireSession(myWallet);
+  const { data, error } = await sb.functions.invoke('dm-mark-read', {
+    body: {
+      sessionToken: session.token,
+      peerWallet,
+    },
   });
   if (error) throw error;
-  // Broadcast a same-tab event so listeners (e.g. SideNav unread badge)
-  // can refresh immediately, without waiting for the Realtime UPDATE
-  // round-trip or the polling interval.
+  const count = (data as { count?: number } | null)?.count ?? 0;
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('aura:dm:read', {
-      detail: { wallet: myWallet, peer: peerWallet, count: data as number },
+      detail: { wallet: myWallet, peer: peerWallet, count },
     }));
   }
-  return (data as number) ?? 0;
+  return count;
 }
 
 // ─── Realtime subscription ──────────────────────────────────────────

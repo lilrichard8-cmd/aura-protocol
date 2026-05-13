@@ -46,7 +46,7 @@ export default function ProtocolPage() {
               <a
                 href="https://aura-protocol.vercel.app"
                 target="_blank"
-                rel="noopener"
+                rel="noopener noreferrer"
                 className="text-sm text-teal-300 hover:text-white transition-colors flex items-center gap-1"
               >
                 Protocol Website <ExternalLink className="w-3 h-3" />

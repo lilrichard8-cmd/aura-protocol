@@ -4,6 +4,13 @@ import type { WalletName } from '@solana/wallet-adapter-base';
 import { currentUser } from '@/data/mock';
 import { useMockChain, JUDGE_DEMO_STATE, NEW_ACCOUNT_STARTER_STATE } from '@/context/MockChainContext';
 import type { User } from '@/types';
+import { supabase, SUPABASE_CONFIGURED } from '@/lib/supabase';
+import {
+  b58encode,
+  buildLoginMessage,
+  clearSession,
+  saveSession,
+} from '@/lib/wallet-auth';
 
 // Pre-configured judge account for hackathon evaluators
 // Note: hasCreatorCoin starts false — evaluator gets to walk through the mint flow.
@@ -213,19 +220,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const realAddress = typeof pk === 'string' ? pk : pk.toBase58();
 
-      // Step 3: ask user to sign a welcome message (off-chain, no gas)
-      // Sign via the adapter directly so we don't depend on React state.
+      // Step 3: SIWS-style sign-in. The signature both proves wallet
+      // ownership AND establishes a 1-hour session token used by the DM
+      // and follow Edge Functions. Without this no write to Supabase is
+      // authenticated and anyone could forge messages on behalf of any
+      // wallet (the public anon key is enough). If Supabase isn't
+      // configured at all (pure-demo build) we fall back to a no-op
+      // signature so the connect flow doesn't break.
       const signMessageFn = (adapter as any).signMessage?.bind(adapter)
         ?? solWallet.signMessage;
       if (signMessageFn) {
         try {
-          const msg = `Welcome to AURA\nSign this message to verify your wallet ownership.\nThis is an off-chain signature — no transaction, no gas.\nTimestamp: ${Date.now()}`;
-          const encoded = new TextEncoder().encode(msg);
-          await signMessageFn(encoded);
+          if (SUPABASE_CONFIGURED && supabase) {
+            const domain = typeof window !== 'undefined' ? window.location.host : 'aura.li';
+            const nonce = crypto.randomUUID();
+            const issuedAt = new Date().toISOString();
+            const message = buildLoginMessage({ domain, wallet: realAddress, nonce, issuedAt });
+            const sigBytes = await signMessageFn(new TextEncoder().encode(message));
+            const signature = b58encode(sigBytes);
+            const { data, error } = await supabase.functions.invoke('wallet-auth', {
+              body: { wallet: realAddress, signature, nonce, issuedAt, domain },
+            });
+            if (error) throw error;
+            const token = (data as { token?: string } | null)?.token;
+            const expiresAt = (data as { expiresAt?: number } | null)?.expiresAt;
+            if (token && expiresAt) {
+              saveSession({ token, wallet: realAddress, expiresAt });
+            } else {
+              throw new Error('wallet-auth returned no token');
+            }
+          } else {
+            // Demo build without Supabase — still prove wallet control so
+            // the UX matches production.
+            const msg = `Welcome to AURA\nSign this message to verify your wallet ownership.\nNo transaction, no gas.\nTimestamp: ${Date.now()}`;
+            await signMessageFn(new TextEncoder().encode(msg));
+          }
         } catch (signErr) {
           // User rejected the sign request — disconnect and bail
           try { await adapter.disconnect(); } catch {}
-          throw new WalletConnectError('user_rejected', 'User declined the welcome signature');
+          clearSession();
+          // eslint-disable-next-line no-console
+          console.warn('[connectWallet] sign-in failed', signErr);
+          throw new WalletConnectError('user_rejected', 'Sign-in signature declined or failed');
         }
       }
 
@@ -324,6 +360,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       'aura_user_comments',
     ];
     KEYS_TO_CLEAR.forEach(k => localStorage.removeItem(k));
+    // Wallet session token must not survive logout — otherwise the next
+    // user on the same browser inherits write access to the previous wallet.
+    clearSession();
     // Best-effort wallet disconnect (don't await — UX should not block on this)
     try { void solWallet.disconnect?.(); } catch {}
     setUser(null);

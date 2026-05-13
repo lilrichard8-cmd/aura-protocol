@@ -67,7 +67,9 @@ programs_backup_*/
 
 # ─── Stale subprojects (not part of monorepo) ─────────────────
 vite-app/
-iris-chat/
+# legacy /iris-chat (top-level standalone). The May-2026 Edge Function
+# aura-mainstream/supabase/functions/iris-chat/ MUST remain tracked.
+/iris-chat/
 programs_backup_*/
 
 # ─── Media (Colosseum submission: skeleton-only repo) ─────────

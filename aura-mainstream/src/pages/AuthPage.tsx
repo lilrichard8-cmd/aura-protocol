@@ -247,7 +247,7 @@ export default function AuthPage() {
               <a
                 href={walletError.provider === 'phantom' ? 'https://phantom.com/download' : 'https://solflare.com/download'}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
                 className="inline-block mt-2 text-orange-600 dark:text-orange-400 underline hover:no-underline"
               >
                 Get {walletError.provider === 'phantom' ? 'Phantom' : 'Solflare'} →

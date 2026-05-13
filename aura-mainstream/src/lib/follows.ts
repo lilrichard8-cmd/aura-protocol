@@ -1,13 +1,17 @@
 /**
  * Wallet follow graph — Supabase-backed cross-wallet follows.
  *
- * Each follow is an edge stored in `wallet_follows`. We surface them
- * via the dedicated RPCs (`follow_wallet` / `list_followers` / etc.) so
- * the anon-key client can act without a wallet-bound JWT — RLS allows
- * SELECT only when the requesting JWT carries one of the involved
- * wallets, which we'll plug in once the wallet auth flow lands.
+ * Reads (list_followers / list_following / is_following) stay on the
+ * SECURITY DEFINER Postgres RPCs because follow relationships are
+ * intentionally public on a social platform.
+ *
+ * Writes (follow / unfollow) now go through Edge Functions which
+ * require a wallet session token (see lib/wallet-auth.ts). Without
+ * this, the public anon key would let anyone forge follow edges from
+ * any wallet to any wallet.
  */
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
+import { loadSession } from './wallet-auth';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 export interface WalletFollow {
@@ -27,6 +31,15 @@ function ensureConfigured() {
   return supabase;
 }
 
+function requireSession(expectedWallet: string) {
+  const s = loadSession();
+  if (!s) throw new Error('WALLET_SESSION_REQUIRED');
+  if (s.wallet !== expectedWallet) {
+    throw new Error(`Session wallet ${s.wallet} does not match requested ${expectedWallet}`);
+  }
+  return s;
+}
+
 export async function followWallet(args: {
   follower: string;
   followee: string;
@@ -35,22 +48,30 @@ export async function followWallet(args: {
   followerAvatar?: string;
 }): Promise<WalletFollow> {
   const sb = ensureConfigured();
-  const { data, error } = await sb.rpc('follow_wallet', {
-    follower: args.follower,
-    followee: args.followee,
-    follower_display_name: args.followerDisplayName ?? null,
-    follower_username: args.followerUsername ?? null,
-    follower_avatar: args.followerAvatar ?? null,
+  const session = requireSession(args.follower);
+  const { data, error } = await sb.functions.invoke('follow', {
+    body: {
+      sessionToken: session.token,
+      followee: args.followee,
+      followerDisplayName: args.followerDisplayName ?? null,
+      followerUsername: args.followerUsername ?? null,
+      followerAvatar: args.followerAvatar ?? null,
+    },
   });
   if (error) throw error;
-  return data as WalletFollow;
+  const row = (data as { row?: WalletFollow } | null)?.row;
+  if (!row) throw new Error('follow returned no row');
+  return row;
 }
 
 export async function unfollowWallet(follower: string, followee: string): Promise<number> {
   const sb = ensureConfigured();
-  const { data, error } = await sb.rpc('unfollow_wallet', { follower, followee });
+  const session = requireSession(follower);
+  const { data, error } = await sb.functions.invoke('unfollow', {
+    body: { sessionToken: session.token, followee },
+  });
   if (error) throw error;
-  return (data as number) ?? 0;
+  return (data as { removed?: number } | null)?.removed ?? 0;
 }
 
 export async function listFollowers(target: string, limit = 200): Promise<WalletFollow[]> {
