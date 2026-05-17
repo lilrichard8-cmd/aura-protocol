@@ -266,4 +266,4 @@ npm run build
 - [Solana Web3.js Documentation](https://solana-labs.github.io/solana-web3.js/)
 - [Anchor Framework](https://www.anchor-lang.com/)
 - [Solana Wallet Adapter](https://github.com/solana-labs/wallet-adapter)
-- [AURA Protocol Whitepaper](../docs/AURA_Web3升级方案_v1.md)
+- [AURA Protocol Whitepaper](../docs/AURA_Whitepaper_v1.md)

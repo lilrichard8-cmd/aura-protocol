@@ -1,6 +1,6 @@
 # Wallet Integration · 2026-05-01
 
-**By:** Iris (主 session, Opus 4.7)
+**By:** Iris (main session, Opus 4.7)
 **Scope:** AuthPage / AuthContext / MockChainContext / main.tsx
 **Build:** ✅ `npm run build` passes (4.04s, 6753 modules)
 

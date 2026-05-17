@@ -134,11 +134,11 @@ pub mod aura_curation {
 }
 
 /// Calculate time decay weight based on discovery time
-/// - 前 1 小时发现: 10x
-/// - 1-6 小时: 5x  
-/// - 6-24 小时: 2x
-/// - 24-72 小时: 1x
-/// - 72 小时后: 0.1x
+/// - First 1 hour discovery: 10x
+/// - 1-6 hours: 5x
+/// - 6-24 hours: 2x
+/// - 24-72 hours: 1x
+/// - After 72 hours: 0.1x
 fn calculate_time_decay_weight(time_delta_seconds: i64) -> Result<u64> {
     const HOUR: i64 = 60 * 60;
     const BASE_WEIGHT: u64 = 1000; // Use 1000 as base for better precision

@@ -169,7 +169,7 @@ pub mod aura_creator_coin {
         Ok(())
     }
 
-    /// Place a sell order (挂单卖出)
+    /// Place a sell order
     pub fn create_sell_order(
         ctx: Context<CreateOrder>,
         amount: u64,

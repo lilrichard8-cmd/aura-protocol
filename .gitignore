@@ -91,3 +91,22 @@ programs_backup_*/
 *.gif
 *.svg
 # Exception: small logo SVGs / inline-component icons if any
+
+# Security audit notes - local only, do NOT commit
+aura-mainstream/DEPLOY_SECURITY_FIXES.md
+aura-mainstream/deploy-security.sh
+
+# === Internal docs (kept local, not pushed) ===
+AUDIT_REPORT_*.md
+AUDIT_TASK_*.md
+CONTRACT_SPEC_*.md
+PROJECT_STATUS.md
+QUICKSTART.md
+INSTALLATION_GUIDE.md
+setup-and-run.sh
+aura-mainstream/SPEC.md
+aura-afterdark/SPEC.md
+
+# === Internal directories (kept local, not pushed) ===
+demo-video/
+aura-afterdark/
