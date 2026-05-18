@@ -8,6 +8,14 @@ export interface AuraClientConfig {
   network: 'mainnet' | 'devnet' | 'testnet' | 'localnet';
   wallet: WalletAdapter;
   rpcUrl?: string;
+  /** Per-network market-module config (ORA mint + treasury pool accounts).
+   *  Required for real bounty operations; omit for type-only / read-only use. */
+  marketConfig?: {
+    stakingRewardsPool: PublicKey;
+    gasReservePool: PublicKey;
+    opsTreasuryPool: PublicKey;
+    oraMint: PublicKey;
+  };
 }
 
 /**

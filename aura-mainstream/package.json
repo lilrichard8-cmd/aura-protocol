@@ -11,6 +11,7 @@
     "build:check": "tsc -b && vite build"
   },
   "dependencies": {
+    "@aura-protocol/sdk": "file:../sdk",
     "@radix-ui/react-progress": "^1.1.8",
     "@solana/wallet-adapter-react": "^0.15.39",
     "@solana/wallet-adapter-react-ui": "^0.9.39",

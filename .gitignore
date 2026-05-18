@@ -110,3 +110,7 @@ aura-afterdark/SPEC.md
 # === Internal directories (kept local, not pushed) ===
 demo-video/
 aura-afterdark/
+
+# Legacy backups created during refactoring
+*.legacy-bak
+*.legacy-bak2

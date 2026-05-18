@@ -91,8 +91,16 @@ pub mod aura_core {
         let follower_profile = &mut ctx.accounts.follower_profile;
         let target_profile = &mut ctx.accounts.target_profile;
 
-        follower_profile.following_count = follower_profile.following_count.saturating_sub(1);
-        target_profile.follower_count = target_profile.follower_count.saturating_sub(1);
+        // [audit fix A.L-1] checked_sub instead of saturating_sub so accounting
+        // bugs surface as Overflow errors instead of silently flooring at 0.
+        follower_profile.following_count = follower_profile
+            .following_count
+            .checked_sub(1)
+            .ok_or(ErrorCode::Overflow)?;
+        target_profile.follower_count = target_profile
+            .follower_count
+            .checked_sub(1)
+            .ok_or(ErrorCode::Overflow)?;
 
         msg!("User unfollowed");
         Ok(())
@@ -100,8 +108,11 @@ pub mod aura_core {
 
     /// Like a post
     /// FIX #1: Added duplicate like prevention via LikeRecord PDA
+    /// [audit fix A.M-2] enforce `post.is_active` so dead / unpublished posts
+    /// cannot have their like counter inflated via fake-post-spam.
     pub fn like_post(ctx: Context<LikePost>) -> Result<()> {
         let post = &mut ctx.accounts.post;
+        require!(post.is_active, ErrorCode::PostInactive);
         post.likes = post.likes.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         let like_record = &mut ctx.accounts.like_record;
@@ -117,7 +128,8 @@ pub mod aura_core {
     /// Unlike a post
     pub fn unlike_post(ctx: Context<UnlikePost>) -> Result<()> {
         let post = &mut ctx.accounts.post;
-        post.likes = post.likes.saturating_sub(1);
+        // [audit fix A.L-1] checked_sub for defense-in-depth (matches unfollow_user)
+        post.likes = post.likes.checked_sub(1).ok_or(ErrorCode::Overflow)?;
 
         msg!("Post unliked");
         Ok(())
@@ -266,14 +278,25 @@ pub struct FollowUser<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// [audit fix A.M-1] Add explicit `seeds = [b"user", target_profile.authority]`
+// on `target_profile` as defense-in-depth. The follow_record seed binding
+// already prevents passing a foreign target_profile (would produce a seed
+// mismatch), but a direct seed assertion on the user PDA makes the intent
+// unmistakable and the resulting error message clearer.
 #[derive(Accounts)]
 pub struct UnfollowUser<'info> {
     #[account(
         mut,
+        seeds = [b"user", authority.key().as_ref()],
+        bump = follower_profile.bump,
         has_one = authority @ ErrorCode::Unauthorized
     )]
     pub follower_profile: Account<'info, UserProfile>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"user", target_profile.authority.as_ref()],
+        bump = target_profile.bump,
+    )]
     pub target_profile: Account<'info, UserProfile>,
     #[account(
         mut,
@@ -341,4 +364,7 @@ pub enum ErrorCode {
     CannotFollowSelf,
     #[msg("Arithmetic overflow")]
     Overflow,
+    // [audit fix A.M-2] like_post / unlike_post require active post
+    #[msg("Post is not active")]
+    PostInactive,
 }

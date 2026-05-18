@@ -9,7 +9,12 @@ members = [
     "programs/social-graph",
     "programs/content-license",
     "programs/reputation",
-    "programs/fractionalize"
+    "programs/fractionalize",
+    "programs/ora",
+    "programs/rewards",
+    "programs/staking",
+    "programs/livestream",
+    "programs/type-b"
 ]
 
 [profile.release]

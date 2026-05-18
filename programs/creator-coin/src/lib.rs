@@ -12,6 +12,28 @@ pub use redemption::*;
 
 declare_id!("B38n2DX7BR4tEait7Pn3SHUwB29WQt4U8jttCQgJZ57w");
 
+// ─── Hardcoded protocol authorities (audit batch 2) ─────────────────────────
+// ⚠️ DO NOT DEPLOY: these are System Program ID placeholders so the program
+// compiles. PRE-MAINNET TODO: replace each with the real authority pubkey:
+//   - PROGRAM_ADMIN: AURA multisig (init/rotate gated ops)
+//   - PROTOCOL_AUTHORITY: arbitration multisig (execute_ruling)
+//   - ACTIVITY_ORACLE: protocol-controlled oracle key (unlock_monthly)
+//   - AUTO_CONFIRM_KEEPER: protocol keeper bot (auto_confirm)
+// These mirror the Bounty V2 audit C-4 fix pattern (hardcoded admin const).
+
+/// [audit fix B.C-5] Hardcoded admin key required to call `init_burn_tracker`.
+/// Prevents front-run init of the global singleton burn tracker PDA.
+pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [audit fix B.C-10] Hardcoded activity oracle required to call `unlock_monthly`.
+/// Replaces the per-coin `creator_coin.activity_oracle` field (which the creator
+/// could set to themselves, defeating the C-7 fix from batch 1).
+pub const ACTIVITY_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [audit fix B.C-8] Hardcoded keeper required to call `auto_confirm`.
+/// Prevents arbitrary signers from racing the buyer's dispute window.
+pub const AUTO_CONFIRM_KEEPER: Pubkey = anchor_lang::solana_program::system_program::ID;
+
 /// Fixed supply per creator coin
 const TOTAL_SUPPLY_RAW: u64 = 10_000 * 1_000_000_000; // 9 decimals
 /// Initial unlocked supply
@@ -55,6 +77,11 @@ pub mod aura_creator_coin {
         let creator_key = ctx.accounts.creator.key();
         let mint_key = ctx.accounts.creator_coin_mint.key();
         let bump = ctx.bumps.creator_coin;
+
+        // [audit fix B.C-10] reject self-oracle to harden the global ACTIVITY_ORACLE
+        // gate (defense-in-depth: even if the global const were swapped to a per-coin
+        // model later, the creator can never list themselves as oracle).
+        require!(activity_oracle != ctx.accounts.creator.key(), ErrorCode::Unauthorized);
 
         // Mint initial 2,000 to creator
         let seeds = &[b"creator_coin", creator_key.as_ref(), &[bump]];
@@ -125,9 +152,13 @@ pub mod aura_creator_coin {
         let coin_bump = coin_ro.bump;
         let mint_key = coin_ro.mint;
         let initial_price = coin_ro.initial_price;
-        // [audit fix C-7] verify oracle is the recorded one
+        // [audit fix B.C-10] gate on global ACTIVITY_ORACLE const, not per-coin field
+        // (the per-coin field was creator-chosen, so it could be set to the creator
+        // themselves, fully defeating the batch-1 C-7 fix). The Accounts context
+        // already enforces this via `address = ACTIVITY_ORACLE`; the body keeps
+        // the explicit assertion for clarity and defense in depth.
         require!(
-            ctx.accounts.activity_oracle.key() == coin_ro.activity_oracle,
+            ctx.accounts.activity_oracle.key() == ACTIVITY_ORACLE,
             ErrorCode::Unauthorized
         );
 
@@ -298,9 +329,14 @@ pub mod aura_creator_coin {
     }
 
     /// Cancel an order
+    /// [audit fix B.C-1 + B.C-13] Cancel an order.
+    /// Accounts context now binds: order PDA via seeds, maker via seed match,
+    /// creator_coin to order.coin_mint, escrow and maker_coin to creator_coin
+    /// mint/owner. `close = maker` returns the rent on success.
     pub fn cancel_order(ctx: Context<CancelOrder>) -> Result<()> {
         let order = &mut ctx.accounts.order;
         require!(order.is_active, ErrorCode::OrderNotActive);
+        // Defense-in-depth: redundant with seed match in CancelOrder context.
         require!(order.maker == ctx.accounts.maker.key(), ErrorCode::Unauthorized);
 
         let unfilled = order.amount - order.filled;
@@ -323,12 +359,21 @@ pub mod aura_creator_coin {
                 unfilled,
             )?;
         }
+        // [audit fix B.C-13] `close = maker` (in Accounts context) handles account
+        // closure; the `is_active = false` mutation is kept for the brief window
+        // before Anchor zeros the discriminator (defensive).
         order.is_active = false;
         Ok(())
     }
 
     // ===== Benefits Instructions (Task #5) =====
 
+    /// [audit fix B.C-6] LEGACY / MIGRATION-ONLY: `create_creator_coin` now
+    /// initializes the benefits_list atomically (batch-1 H-9 fix), so this
+    /// instruction is normally unreachable (the `init` constraint will fail
+    /// because the PDA already exists). It is retained for SDK compatibility
+    /// and as a future migration path. The context already requires the creator
+    /// to sign and the coin_mint to match `creator_coin.mint`.
     pub fn init_benefits_list(ctx: Context<InitBenefitsListCtx>) -> Result<()> {
         let bl = &mut ctx.accounts.benefits_list;
         bl.coin_mint = ctx.accounts.coin_mint.key();
@@ -371,6 +416,13 @@ pub mod aura_creator_coin {
         Ok(())
     }
 
+    /// [audit fix B.M-3] `threshold` is now IMMUTABLE after benefit creation.
+    /// Previously the creator could call `update_benefit(threshold=...)` after
+    /// buyers had qualified or queued redemptions, retroactively re-pricing the
+    /// benefit (bait-and-switch). To change threshold the creator must now
+    /// `deactivate_benefit` and `add_benefit` afresh — producing a new
+    /// `benefit_id` that buyers can distinguish from the original.
+    /// Metadata URI/hash remain updatable so creators can fix off-chain links.
     pub fn update_benefit(
         ctx: Context<ModifyBenefitsCtx>,
         benefit_id: u32,
@@ -378,11 +430,13 @@ pub mod aura_creator_coin {
         metadata_uri: Option<String>,
         metadata_hash: Option<[u8; 32]>,
     ) -> Result<()> {
+        // [audit fix B.M-3] threshold immutability
+        require!(threshold.is_none(), BenefitsError::ThresholdImmutable);
+
         let bl = &mut ctx.accounts.benefits_list;
         let benefit = bl.benefits.iter_mut().find(|b| b.id == benefit_id).ok_or(BenefitsError::BenefitNotFound)?;
         require!(benefit.is_active, BenefitsError::BenefitInactive);
 
-        if let Some(t) = threshold { require!(t > 0, BenefitsError::InvalidThreshold); benefit.threshold = t; }
         if let Some(uri) = metadata_uri { require!(uri.len() <= benefits::MAX_URI_LEN, BenefitsError::UriTooLong); benefit.metadata_uri = uri; }
         if let Some(hash) = metadata_hash { benefit.metadata_hash = hash; }
 
@@ -813,7 +867,15 @@ pub struct CreateCreatorCoin<'info> {
     #[account(init, payer = creator, space = BenefitsList::MAX_SIZE,
         seeds = [b"benefits", creator_coin_mint.key().as_ref()], bump)]
     pub benefits_list: Account<'info, BenefitsList>,
-    #[account(mut)]
+    // [audit fix B.C-11] bind initial supply destination to creator + correct mint.
+    // Even though `creator` is a Signer, this prevents the creator from accidentally
+    // (or maliciously, in case of malware-replaced signer) routing the 2000-token
+    // genesis allocation to an unrelated account.
+    #[account(
+        mut,
+        constraint = creator_token_account.owner == creator.key() @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == creator_coin_mint.key() @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
     #[account(seeds = [b"user", creator.key().as_ref()], bump = creator_profile.bump,
         constraint = creator_profile.authority == creator.key() @ ErrorCode::Unauthorized)]
@@ -832,11 +894,21 @@ pub struct UnlockMonthly<'info> {
     pub creator_coin: Account<'info, CreatorCoin>,
     #[account(mut, seeds = [b"creator_coin_mint", creator.key().as_ref()], bump)]
     pub creator_coin_mint: Account<'info, Mint>,
-    #[account(mut)]
+    // [audit fix B.C-12] bind monthly-unlock destination to the recorded creator
+    // + matching mint. Without this, the activity oracle could route 800 CC of
+    // monthly unlock to any account.
+    #[account(
+        mut,
+        constraint = creator_token_account.owner == creator_coin.creator @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    /// CHECK: pubkey-only — must equal creator_coin.activity_oracle
+    /// CHECK: pubkey-only — must equal creator_coin.creator (seed-checked above)
     pub creator: AccountInfo<'info>,
-    /// [audit fix C-7] Activity oracle MUST sign — prevents creator self-report
+    /// [audit fix B.C-10] Activity oracle MUST equal the hardcoded global ACTIVITY_ORACLE
+    /// const. The per-coin `creator_coin.activity_oracle` field is no longer used as the
+    /// gate (the creator could set it to themselves, defeating the C-7 fix from batch 1).
+    #[account(address = ACTIVITY_ORACLE @ ErrorCode::Unauthorized)]
     pub activity_oracle: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -849,9 +921,23 @@ pub struct CreateOrder<'info> {
     #[account(init, payer = maker, space = 8 + 32 + 32 + 1 + 8 + 8 + 8 + 1 + 8 + 8 + 1,
         seeds = [b"order", maker.key().as_ref(), order_nonce.to_le_bytes().as_ref()], bump)]
     pub order: Account<'info, Order>,
-    #[account(mut)]
+    // [audit fix B.H-3] bind maker_coin_account to maker + creator_coin.mint so a
+    // hostile maker cannot funnel their own tokens into a third-party account.
+    #[account(
+        mut,
+        constraint = maker_coin_account.owner == maker.key() @ ErrorCode::Unauthorized,
+        constraint = maker_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub maker_coin_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix B.H-3] escrow must be owned by the creator_coin PDA + correct mint
+    // (matches the redemption escrow pattern from batch-1 C-4). Without this, the
+    // escrow could be PDA-owned by some other authority → the cancel/fill flows
+    // that re-sign as `creator_coin` would fail later and lock maker funds.
+    #[account(
+        mut,
+        constraint = escrow_coin_account.owner == creator_coin.key() @ ErrorCode::Unauthorized,
+        constraint = escrow_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub escrow_coin_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub maker: Signer<'info>,
@@ -861,11 +947,32 @@ pub struct CreateOrder<'info> {
 
 #[derive(Accounts)]
 pub struct FillOrder<'info> {
-    #[account(mut)]
+    // [audit fix B.C-2] bind creator_coin to its canonical PDA AND require
+    // `creator_coin.mint == order.coin_mint`. Without this, an attacker could pass
+    // a foreign creator_coin + foreign escrow to drain a different CC's escrow.
+    #[account(
+        mut,
+        seeds = [b"creator_coin", creator_coin.creator.as_ref()],
+        bump = creator_coin.bump,
+        constraint = creator_coin.mint == order.coin_mint @ ErrorCode::Unauthorized,
+    )]
     pub creator_coin: Account<'info, CreatorCoin>,
-    #[account(mut, constraint = order.is_active @ ErrorCode::OrderNotActive)]
+    // [audit fix B.H-1] seed-verify Order so `order.maker` + `order.nonce` cannot
+    // be spoofed via discriminator-only validation.
+    #[account(
+        mut,
+        seeds = [b"order", order.maker.as_ref(), order.nonce.to_le_bytes().as_ref()],
+        bump = order.bump,
+        constraint = order.is_active @ ErrorCode::OrderNotActive,
+    )]
     pub order: Account<'info, Order>,
-    #[account(mut)]
+    // [audit fix B.C-2] escrow must be owned by the (now-verified) creator_coin PDA
+    // AND must hold the matching CC mint. Closes the escrow-swap exploit.
+    #[account(
+        mut,
+        constraint = escrow_coin_account.owner == creator_coin.key() @ ErrorCode::Unauthorized,
+        constraint = escrow_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub escrow_coin_account: Account<'info, TokenAccount>,
     // [audit fix C-17] CC destination owner == buyer; mint matches creator_coin.mint
     #[account(mut,
@@ -900,13 +1007,44 @@ pub struct FillOrder<'info> {
 
 #[derive(Accounts)]
 pub struct CancelOrder<'info> {
+    // [audit fix B.C-1] bind creator_coin to its canonical PDA AND require
+    // `creator_coin.mint == order.coin_mint`. Without this, an attacker could
+    // cancel their own order on coin A while passing coin X's creator_coin/escrow
+    // → the PDA signer would drain coin X's escrow.
+    #[account(
+        seeds = [b"creator_coin", creator_coin.creator.as_ref()],
+        bump = creator_coin.bump,
+        constraint = creator_coin.mint == order.coin_mint @ ErrorCode::Unauthorized,
+    )]
     pub creator_coin: Account<'info, CreatorCoin>,
-    #[account(mut)]
+    // [audit fix B.C-1 + B.C-13] seed-verify Order; close = maker to reclaim rent
+    // (matches Bounty V2 M-1 fix). The `maker` constraint here is enforced via
+    // the seed (Order PDA is `["order", maker, nonce]`), so any `maker` in the
+    // accounts struct that mismatches order.maker triggers a seed mismatch.
+    #[account(
+        mut,
+        seeds = [b"order", maker.key().as_ref(), order.nonce.to_le_bytes().as_ref()],
+        bump = order.bump,
+        constraint = order.maker == maker.key() @ ErrorCode::Unauthorized,
+        close = maker,
+    )]
     pub order: Account<'info, Order>,
-    #[account(mut)]
+    // [audit fix B.C-1] escrow must be owned by the verified creator_coin PDA
+    // AND match `creator_coin.mint`.
+    #[account(
+        mut,
+        constraint = escrow_coin_account.owner == creator_coin.key() @ ErrorCode::Unauthorized,
+        constraint = escrow_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub escrow_coin_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    // [audit fix B.C-1] return destination must be maker-owned + matching mint.
+    #[account(
+        mut,
+        constraint = maker_coin_account.owner == maker.key() @ ErrorCode::Unauthorized,
+        constraint = maker_coin_account.mint == creator_coin.mint @ ErrorCode::Unauthorized,
+    )]
     pub maker_coin_account: Account<'info, TokenAccount>,
+    #[account(mut)]
     pub maker: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -943,8 +1081,24 @@ pub struct InitRedemptionCounterCtx<'info> {
     #[account(init, payer = payer, space = RedemptionCounter::SIZE,
         seeds = [b"redemption-counter", coin_mint.key().as_ref()], bump)]
     pub redemption_counter: Account<'info, RedemptionCounter>,
-    /// CHECK: Coin mint
-    pub coin_mint: AccountInfo<'info>,
+    // [audit fix B.C-4] verify coin_mint is the canonical creator_coin_mint PDA for
+    // a real creator + tie it to a CreatorCoin record owned by the signing creator.
+    // This prevents front-run init for arbitrary (non-mint) pubkeys and ensures the
+    // counter exists only for legitimate creator coins.
+    #[account(
+        seeds = [b"creator_coin", creator.key().as_ref()],
+        bump = creator_coin.bump,
+        constraint = creator_coin.creator == creator.key() @ ErrorCode::Unauthorized,
+        constraint = creator_coin.mint == coin_mint.key() @ ErrorCode::Unauthorized,
+    )]
+    pub creator_coin: Account<'info, CreatorCoin>,
+    #[account(
+        seeds = [b"creator_coin_mint", creator.key().as_ref()],
+        bump,
+    )]
+    pub coin_mint: Account<'info, Mint>,
+    /// [audit fix B.C-4] creator must sign; payer can still be anyone.
+    pub creator: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -973,6 +1127,15 @@ pub struct InitiateRedemptionCtx<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
     /// CHECK: Creator pubkey persisted into Redemption.creator; subsequent calls validate has_one
+    /// [audit fix round2 B2.H-1] bound to benefits_list.creator so the buyer
+    /// cannot spoof an arbitrary pubkey here. Without this, a buyer could
+    /// supply a collaborator's key, route MarkDelivered/ConfirmReceipt
+    /// through them, and never pay the real creator while still consuming
+    /// the benefits_list. Now the on-chain truth (benefits_list.creator) is
+    /// the only acceptable value.
+    #[account(
+        constraint = creator.key() == benefits_list.creator @ RedemptionError::Unauthorized,
+    )]
     pub creator: AccountInfo<'info>,
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -1029,6 +1192,9 @@ pub struct AutoConfirmCtx<'info> {
         constraint = creator_token_account.mint == redemption.coin_mint @ RedemptionError::Unauthorized
     )]
     pub creator_token_account: Account<'info, TokenAccount>,
+    /// [audit fix B.C-8] keeper must equal the hardcoded AUTO_CONFIRM_KEEPER.
+    /// Prevents arbitrary signers from racing the buyer's dispute window.
+    #[account(address = AUTO_CONFIRM_KEEPER @ RedemptionError::Unauthorized)]
     pub keeper: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -1074,10 +1240,12 @@ pub struct ExecuteRulingCtx<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-/// [audit fix C-3] Hardcoded protocol authority for arbitration ruling execution.
+/// [audit fix C-3 + B.C-7] Hardcoded protocol authority for arbitration ruling execution.
 /// ⚠️ DO NOT DEPLOY: this is the System Program ID as a build-time placeholder so the
 /// program compiles. PRE-MAINNET TODO: replace with the real Year 1 multisig pubkey
 /// (5/7) and after Phase 3 with a governance program PDA via CPI.
+/// While this remains a placeholder, `execute_ruling` is intentionally bricked
+/// (no one can sign as the System Program) — safer than a wrong default authority.
 pub const PROTOCOL_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 // Gift context
@@ -1139,18 +1307,23 @@ pub struct PrimaryBuyCtx<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-/// [audit fix C-8] Hardcoded protocol fee pools for creator-coin program.
+/// [audit fix C-8 + B.C-3] Hardcoded protocol fee pools for creator-coin program.
 /// ⚠️ DO NOT DEPLOY — placeholders; replace with real protocol PDAs pre-mainnet.
+/// While these remain System Program IDs, `fill_order` and `primary_buy` will fail
+/// at Anchor account deserialization (System Program is not a TokenAccount). This
+/// is intentional — prevents fee leakage if accidentally deployed.
 pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 // Burn Tracker context (#11)
+// [audit fix B.C-5] init must be called by PROGRAM_ADMIN; prevents anonymous
+// rent-payer front-running on the global singleton tracker PDA.
 #[derive(Accounts)]
 pub struct InitBurnTrackerCtx<'info> {
     #[account(init, payer = payer, space = BurnTracker::SIZE, seeds = [b"burn-tracker"], bump)]
     pub burn_tracker: Account<'info, BurnTracker>,
-    #[account(mut)]
+    #[account(mut, address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
 }

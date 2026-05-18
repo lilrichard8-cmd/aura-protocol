@@ -190,6 +190,7 @@ pub enum ArbitrationError {
     #[msg("Unauthorized")] Unauthorized,
     #[msg("Overflow")] Overflow,
     #[msg("URI too long")] UriTooLong,
+    #[msg("Arbitration disabled until real VRF is integrated")] ArbitrationDisabled,
 }
 
 // === Events ===

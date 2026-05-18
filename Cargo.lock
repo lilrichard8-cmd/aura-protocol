@@ -439,11 +439,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-livestream"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "aura-market"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
+]
+
+[[package]]
+name = "aura-ora"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "aura-rewards",
 ]
 
 [[package]]
@@ -455,7 +472,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-rewards"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "aura-social-graph"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
+name = "aura-staking"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
+name = "aura-type-b"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",

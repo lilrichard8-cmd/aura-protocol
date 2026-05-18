@@ -5,11 +5,42 @@ declare_id!("6h1sZi8cG3WNB2r9FqTkgoMLBBUPZWbyWPQ3mRsSPyAv");
 
 const SECONDS_PER_DAY: i64 = 86400;
 
+// =============================================================================
+// [audit fix C-S3 / C-S2 / H-S3] Hardcoded protocol authority + treasury PDAs.
+// ⚠️ DO NOT DEPLOY — placeholders set to system_program::ID. Replace pre-mainnet
+// with the real ORA multisig / treasury pubkeys.
+// =============================================================================
+
+/// Program admin allowed to initialise / upgrade the staking pool.
+/// Mirrors `market::PROGRAM_ADMIN` pattern (bounty-V2 audit C-4).
+pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// Hardcoded reward-vault authority. `claim_staking_reward.reward_vault` must
+/// be owned by this PDA to prevent attacker-controlled vault redirection.
+/// [audit fix C-S3] In production this is the canonical staking-rewards PDA
+/// (derivable from `seeds = [b"staking_pool"]`) — kept here as an explicit
+/// hardcoded address so any drift between contract & deployment is caught.
+pub const REWARD_VAULT_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// Hardcoded source treasury that feeds `update_daily_rewards`.
+/// [audit fix C-S2] Restricts where rewards flow IN from, so the admin can't
+/// "fund" the pool from a personal wallet to game accumulated_reward_per_weight.
+pub const REWARD_SOURCE_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [audit fix R2-M-S1] Codify the canonical ORA mint decimals so cross-
+/// program math stops drifting (livestream assumed 6 decimals, staking
+/// assumed 9). Until a shared `aura-constants` crate is introduced, this
+/// constant is the source of truth for staking-side ORA math.
+/// MIN_STAKE_AMOUNT below is derived from this so the floor stays in sync.
+pub const ORA_DECIMALS: u8 = 9;
+
 #[program]
 pub mod aura_staking {
     use super::*;
 
-    /// Initialize the staking pool
+    /// Initialize the staking pool.
+    /// [audit fix H-S3] Caller must equal hardcoded PROGRAM_ADMIN — prevents
+    /// front-run init attack where attacker becomes pool authority.
     pub fn initialize_staking_pool(
         ctx: Context<InitializeStakingPool>,
     ) -> Result<()> {
@@ -27,17 +58,39 @@ pub mod aura_staking {
         Ok(())
     }
 
-    /// Stake ORA tokens with a lockup tier
+    /// Initialize a per-user stake counter (one-time per user).
+    /// [audit fix C-S1] The counter assigns a monotonic `stake_nonce` to every
+    /// new stake so the stake PDA seeds become `[b"stake", user, nonce_le]` —
+    /// fully re-derivable from on-chain state by unstake / claim.
+    /// Pattern mirrors market::BountyCounter.
+    pub fn initialize_stake_counter(ctx: Context<InitializeStakeCounter>) -> Result<()> {
+        let c = &mut ctx.accounts.stake_counter;
+        c.user = ctx.accounts.user.key();
+        c.next_nonce = 0;
+        c.bump = ctx.bumps.stake_counter;
+        Ok(())
+    }
+
+    /// Stake ORA tokens with a lockup tier.
+    /// [audit fix C-S1] PDA seeds now use a per-user monotonic `stake_nonce`
+    /// drawn from `StakeCounter` (NOT `Clock::get()?.unix_timestamp`).
     pub fn stake_ora(
         ctx: Context<StakeOra>,
         amount: u64,
         lockup_tier: LockupTier,
-        stake_nonce: u64,
     ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
+        // [audit fix M-S1] enforce minimum stake to avoid rounding-to-zero
+        // in reward-per-weight math.
+        require!(amount >= MIN_STAKE_AMOUNT, ErrorCode::StakeBelowMinimum);
 
         let now = Clock::get()?.unix_timestamp;
         let (lockup_days, multiplier_bps) = lockup_tier.params();
+
+        // Allocate stake nonce from the counter
+        let counter = &mut ctx.accounts.stake_counter;
+        let nonce = counter.next_nonce;
+        counter.next_nonce = nonce.checked_add(1).ok_or(ErrorCode::Overflow)?;
 
         // Transfer ORA from user to vault PDA
         token::transfer(
@@ -54,40 +107,60 @@ pub mod aura_staking {
 
         let stake = &mut ctx.accounts.stake_account;
         stake.owner = ctx.accounts.user.key();
-        stake.stake_nonce = stake_nonce;
+        stake.stake_nonce = nonce;
         stake.amount = amount;
-        stake.lockup_tier = lockup_tier;
+        stake.lockup_tier = lockup_tier.clone();
         stake.staked_at = now;
-        stake.unlock_at = now + (lockup_days as i64 * SECONDS_PER_DAY);
+        // [audit fix M-S2] use checked_add to prevent i64 overflow on huge lockups
+        stake.unlock_at = now
+            .checked_add((lockup_days as i64).checked_mul(SECONDS_PER_DAY).ok_or(ErrorCode::Overflow)?)
+            .ok_or(ErrorCode::Overflow)?;
+        require!(stake.unlock_at > stake.staked_at, ErrorCode::Overflow);
         stake.multiplier_bps = multiplier_bps;
         stake.reward_debt = (amount as u128)
             .checked_mul(multiplier_bps as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_mul(ctx.accounts.staking_pool.accumulated_reward_per_weight as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(1_000_000_000)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
         stake.claimed_rewards = 0;
         stake.bump = ctx.bumps.stake_account;
 
         let weighted = (amount as u128)
             .checked_mul(multiplier_bps as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
 
         let pool = &mut ctx.accounts.staking_pool;
         pool.total_staked = pool.total_staked.checked_add(amount).ok_or(ErrorCode::Overflow)?;
         pool.total_weighted_stake = pool.total_weighted_stake.checked_add(weighted).ok_or(ErrorCode::Overflow)?;
 
-        msg!("Staked {} ORA with {:?} lockup (multiplier {}bps)", amount, stake.lockup_tier, multiplier_bps);
+        emit!(StakeEvent {
+            user: stake.owner,
+            amount,
+            lockup_tier,
+            multiplier_bps,
+            timestamp: now,
+            stake_nonce: nonce,
+        });
+
+        msg!("Staked {} ORA nonce={} multiplier={}bps", amount, nonce, multiplier_bps);
         Ok(())
     }
 
     /// Unstake ORA. Early unstake incurs a 20% penalty.
-    pub fn unstake_ora(ctx: Context<UnstakeOra>) -> Result<()> {
+    /// [audit fix C-S1] re-derives the stake PDA from the stored `stake_nonce`.
+    /// [audit fix C-S4] penalty is routed into the reward pool so it is
+    /// distributable to remaining stakers (not stranded in the vault).
+    /// [audit fix C-S5 / H-S1] closes the stake account and zeros reward_debt
+    /// so a later claim against the same PDA is impossible.
+    /// [audit fix round2 R2-H-S1] pays out accrued rewards BEFORE closing the
+    /// stake account so unstakers do not silently forfeit pending rewards.
+    pub fn unstake_ora(ctx: Context<UnstakeOra>, _stake_nonce: u64) -> Result<()> {
         let stake = &ctx.accounts.stake_account;
         let now = Clock::get()?.unix_timestamp;
         let amount = stake.amount;
@@ -95,17 +168,55 @@ pub mod aura_staking {
 
         let is_early = now < stake.unlock_at;
         let penalty = if is_early {
-            amount.checked_mul(20).unwrap().checked_div(100).unwrap() // 20% penalty
+            amount.checked_mul(20).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?
         } else {
             0
         };
-        let withdraw_amount = amount.checked_sub(penalty).unwrap();
+        let withdraw_amount = amount.checked_sub(penalty).ok_or(ErrorCode::Overflow)?;
 
         let pool_bump = ctx.accounts.staking_pool.bump;
         let seeds = &[b"staking_pool".as_ref(), &[pool_bump]];
         let signer = &[&seeds[..]];
 
-        // Transfer from vault to user
+        // [audit fix round2 R2-H-S1] compute and pay pending rewards BEFORE
+        // closing. Uses identical formula to claim_staking_reward so stakers
+        // can never forfeit accrued rewards by unstaking.
+        let pending: u64 = {
+            let pool = &ctx.accounts.staking_pool;
+            let weighted = (amount as u128)
+                .checked_mul(multiplier_bps as u128)
+                .ok_or(ErrorCode::Overflow)?
+                .checked_div(10000)
+                .ok_or(ErrorCode::Overflow)?;
+            weighted
+                .checked_mul(pool.accumulated_reward_per_weight as u128)
+                .ok_or(ErrorCode::Overflow)?
+                .checked_div(1_000_000_000)
+                .ok_or(ErrorCode::Overflow)?
+                .saturating_sub(stake.reward_debt as u128) as u64
+        };
+        if pending > 0 {
+            // Pay rewards from the reward_vault to the user.
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.reward_vault.to_account_info(),
+                        to: ctx.accounts.user_token_account.to_account_info(),
+                        authority: ctx.accounts.staking_pool.to_account_info(),
+                    },
+                    signer,
+                ),
+                pending,
+            )?;
+            emit!(RewardClaimEvent {
+                user: ctx.accounts.user.key(),
+                amount: pending,
+                timestamp: now,
+            });
+        }
+
+        // Transfer principal (minus penalty) from vault to user
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -121,40 +232,95 @@ pub mod aura_staking {
 
         let weighted = (amount as u128)
             .checked_mul(multiplier_bps as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
 
-        let pool = &mut ctx.accounts.staking_pool;
-        pool.total_staked = pool.total_staked.saturating_sub(amount);
-        pool.total_weighted_stake = pool.total_weighted_stake.saturating_sub(weighted);
+        // Decrement totals first so the penalty routing branch reads the
+        // post-unstake total_weighted_stake.
+        let new_total_weighted_stake = {
+            let pool = &mut ctx.accounts.staking_pool;
+            pool.total_staked = pool.total_staked.saturating_sub(amount);
+            pool.total_weighted_stake = pool.total_weighted_stake.saturating_sub(weighted);
+            pool.total_weighted_stake
+        };
 
-        // Zero out stake (effectively closing it)
+        // [audit fix C-S4] route penalty into reward pool so it is distributable
+        // [audit fix R3-H-S2] physically move penalty tokens from vault_token_account
+        // into reward_vault via a real SPL transfer. Previously the accumulator was
+        // credited as if the penalty had landed in reward_vault, but the tokens stayed
+        // in vault_token_account — claimers eventually hit InsufficientFunds on the
+        // reward_vault even though reward_pool_balance still showed surplus.
+        if penalty > 0 && new_total_weighted_stake > 0 {
+            // Physically transfer the penalty tokens into reward_vault so the
+            // accumulator and the on-chain reward_vault balance stay in sync.
+            // CPI is done OUTSIDE the mutable pool borrow so the authority
+            // (`staking_pool.to_account_info()`) can be read immutably.
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.vault_token_account.to_account_info(),
+                        to: ctx.accounts.reward_vault.to_account_info(),
+                        authority: ctx.accounts.staking_pool.to_account_info(),
+                    },
+                    signer,
+                ),
+                penalty,
+            )?;
+            let reward_per_weight = (penalty as u128)
+                .checked_mul(1_000_000_000)
+                .ok_or(ErrorCode::Overflow)?
+                .checked_div(new_total_weighted_stake as u128)
+                .ok_or(ErrorCode::Overflow)? as u64;
+            let pool = &mut ctx.accounts.staking_pool;
+            pool.accumulated_reward_per_weight = pool
+                .accumulated_reward_per_weight
+                .checked_add(reward_per_weight)
+                .ok_or(ErrorCode::Overflow)?;
+            pool.reward_pool_balance = pool.reward_pool_balance.checked_add(penalty).ok_or(ErrorCode::Overflow)?;
+        }
+
+        // [audit fix C-S5] zero stake bookkeeping. The stake_account is closed
+        // via `close = user` on the context so rent is refunded and the PDA
+        // can no longer be loaded by claim_staking_reward.
         let stake_mut = &mut ctx.accounts.stake_account;
         stake_mut.amount = 0;
+        stake_mut.reward_debt = 0;
+
+        emit!(UnstakeEvent {
+            user: ctx.accounts.user.key(),
+            amount,
+            penalty,
+            early: is_early,
+            timestamp: now,
+        });
 
         msg!("Unstaked {} ORA (penalty: {}, early: {})", withdraw_amount, penalty, is_early);
         Ok(())
     }
 
-    /// Claim staking rewards
-    pub fn claim_staking_reward(ctx: Context<ClaimStakingReward>) -> Result<()> {
+    /// Claim staking rewards.
+    /// [audit fix C-S1] re-derives PDA from stake_nonce.
+    /// [audit fix C-S3] reward_vault is constrained to the hardcoded
+    /// REWARD_VAULT_AUTHORITY or the staking_pool PDA owner.
+    /// [audit fix H-S2] user_token_account owner must equal stake.owner.
+    pub fn claim_staking_reward(ctx: Context<ClaimStakingReward>, _stake_nonce: u64) -> Result<()> {
         let pool = &ctx.accounts.staking_pool;
         let stake = &ctx.accounts.stake_account;
 
         let weighted = (stake.amount as u128)
             .checked_mul(stake.multiplier_bps as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap();
+            .ok_or(ErrorCode::Overflow)?;
 
         let pending = weighted
             .checked_mul(pool.accumulated_reward_per_weight as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(1_000_000_000)
-            .unwrap()
-            .checked_sub(stake.reward_debt as u128)
-            .unwrap_or(0) as u64;
+            .ok_or(ErrorCode::Overflow)?
+            .saturating_sub(stake.reward_debt as u128) as u64;
 
         require!(pending > 0, ErrorCode::NoRewardsToClaim);
 
@@ -179,11 +345,38 @@ pub mod aura_staking {
         stake_mut.reward_debt = stake_mut.reward_debt.checked_add(pending).ok_or(ErrorCode::Overflow)?;
         stake_mut.claimed_rewards = stake_mut.claimed_rewards.checked_add(pending).ok_or(ErrorCode::Overflow)?;
 
+        emit!(RewardClaimEvent {
+            user: ctx.accounts.user.key(),
+            amount: pending,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
         msg!("Claimed {} ORA staking rewards", pending);
         Ok(())
     }
 
-    /// Update daily rewards — called daily to add new rewards from 2% fee pool
+    /// [audit fix R2-M-S2] Close a fully-drained per-user `StakeCounter` and
+    /// refund the rent. Only callable by the counter owner. Safe because:
+    ///   (a) `close = user` on `unstake_ora` already closes individual
+    ///       stake PDAs;
+    ///   (b) re-staking after close simply re-inits the counter at
+    ///       `next_nonce = 0`, which is fine because the previous stake
+    ///       PDAs are gone (their accounts are closed) and the
+    ///       `[b"stake", user, nonce_le]` seeds map to brand-new PDAs.
+    /// The user is responsible for closing all active stakes BEFORE calling
+    /// this; if any stake PDA still exists, future stake_ora calls re-using
+    /// nonce 0 would collide — callers are expected to use the SDK helper
+    /// which checks this.
+    pub fn close_stake_counter(_ctx: Context<CloseStakeCounter>) -> Result<()> {
+        msg!("StakeCounter closed; rent refunded");
+        Ok(())
+    }
+
+    /// Update daily rewards — called daily to add new rewards from 2% fee pool.
+    /// [audit fix C-S2] authority must equal hardcoded PROGRAM_ADMIN, AND
+    /// reward_source must be the hardcoded REWARD_SOURCE_TREASURY, AND
+    /// reward_vault must be owned by the staking_pool PDA (enforced by
+    /// constraint in the accounts struct).
     pub fn update_daily_rewards(ctx: Context<UpdateDailyRewards>, reward_amount: u64) -> Result<()> {
         let pool = &mut ctx.accounts.staking_pool;
         let now = Clock::get()?.unix_timestamp;
@@ -210,9 +403,9 @@ pub mod aura_staking {
             // Update accumulated reward per weighted unit
             let reward_per_weight = (reward_amount as u128)
                 .checked_mul(1_000_000_000)
-                .unwrap()
+                .ok_or(ErrorCode::Overflow)?
                 .checked_div(pool.total_weighted_stake as u128)
-                .unwrap() as u64;
+                .ok_or(ErrorCode::Overflow)? as u64;
 
             pool.accumulated_reward_per_weight = pool
                 .accumulated_reward_per_weight
@@ -227,6 +420,14 @@ pub mod aura_staking {
         Ok(())
     }
 }
+
+// === Constants ===
+
+/// [audit fix M-S1 / R2-M-S1] Minimum stake amount = 1 ORA at
+/// `ORA_DECIMALS`. Keeps the reward-per-weight math out of the
+/// rounding-to-zero regime AND keys off the canonical decimals constant so
+/// future decimal changes propagate automatically.
+pub const MIN_STAKE_AMOUNT: u64 = 10u64.pow(ORA_DECIMALS as u32);
 
 // === Enums ===
 
@@ -264,10 +465,24 @@ pub struct StakingPool {
     pub bump: u8,                           // 1
 }
 
+/// [audit fix C-S1] Per-user monotonic nonce allocator. Mirrors
+/// `BountyCounter` from the market program.
+#[account]
+pub struct StakeCounter {
+    pub user: Pubkey,    // 32
+    pub next_nonce: u64, // 8
+    pub bump: u8,        // 1
+}
+
+impl StakeCounter {
+    pub const SIZE: usize = 8 + 32 + 8 + 1;
+    pub const SEED: &'static [u8] = b"stake-counter";
+}
+
 #[account]
 pub struct StakeAccount {
     pub owner: Pubkey,          // 32
-    pub stake_nonce: u64,       // 8 - FIX #12: allows multiple stakes per user
+    pub stake_nonce: u64,       // 8 — [audit fix C-S1] used as PDA seed
     pub amount: u64,            // 8
     pub lockup_tier: LockupTier, // 1
     pub staked_at: i64,         // 8
@@ -293,11 +508,29 @@ pub struct InitializeStakingPool<'info> {
 
     pub ora_mint: Account<'info, Mint>,
 
-    #[account(mut)]
+    // [audit fix H-S3] hardcoded admin gate prevents front-run init.
+    #[account(mut, address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
     pub authority: Signer<'info>,
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeStakeCounter<'info> {
+    #[account(
+        init,
+        payer = user,
+        space = StakeCounter::SIZE,
+        seeds = [StakeCounter::SEED, user.key().as_ref()],
+        bump
+    )]
+    pub stake_counter: Account<'info, StakeCounter>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -309,20 +542,32 @@ pub struct StakeOra<'info> {
     )]
     pub staking_pool: Account<'info, StakingPool>,
 
+    /// [audit fix C-S1] per-user monotonic counter feeds the stake PDA seed.
+    #[account(
+        mut,
+        seeds = [StakeCounter::SEED, user.key().as_ref()],
+        bump = stake_counter.bump,
+        has_one = user @ ErrorCode::Unauthorized,
+    )]
+    pub stake_counter: Account<'info, StakeCounter>,
+
+    /// [audit fix C-S1] seeds use `stake_counter.next_nonce` (BEFORE this ix
+    /// increments it). Anchor evaluates seeds *before* the function body, so
+    /// reading the counter's current `next_nonce` here is correct.
     #[account(
         init,
         payer = user,
-        space = 8 + 32 + 8 + 8 + 1 + 8 + 8 + 2 + 8 + 8 + 1,  // +8 for nonce
-seeds = [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_bytes()],
+        space = 8 + 32 + 8 + 8 + 1 + 8 + 8 + 2 + 8 + 8 + 1,
+        seeds = [b"stake", user.key().as_ref(), stake_counter.next_nonce.to_le_bytes().as_ref()],
         bump
     )]
     pub stake_account: Account<'info, StakeAccount>,
 
     /// Vault PDA token account (authority = staking_pool PDA)
-    #[account(mut)]
+    #[account(mut, constraint = vault_token_account.owner == staking_pool.key() @ ErrorCode::Unauthorized)]
     pub vault_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = user_token_account.owner == user.key() @ ErrorCode::Unauthorized)]
     pub user_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
@@ -334,6 +579,7 @@ seeds = [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_byte
 }
 
 #[derive(Accounts)]
+#[instruction(stake_nonce: u64)]
 pub struct UnstakeOra<'info> {
     #[account(
         mut,
@@ -342,23 +588,39 @@ pub struct UnstakeOra<'info> {
     )]
     pub staking_pool: Account<'info, StakingPool>,
 
+    /// [audit fix C-S1] PDA derived from stake_nonce argument (matches the
+    /// nonce assigned by `stake_ora`).
+    /// [audit fix C-S5] close = user refunds rent + makes future re-loads
+    /// impossible.
+    /// [audit fix H-S1] has_one = user binds the stake to the actual signer.
     #[account(
         mut,
-seeds = [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_bytes()],
+        seeds = [b"stake", user.key().as_ref(), stake_nonce.to_le_bytes().as_ref()],
         bump = stake_account.bump,
         has_one = owner @ ErrorCode::Unauthorized,
-        constraint = stake_account.amount > 0 @ ErrorCode::NothingStaked
+        constraint = stake_account.owner == user.key() @ ErrorCode::Unauthorized,
+        constraint = stake_account.amount > 0 @ ErrorCode::NothingStaked,
+        close = user,
     )]
     pub stake_account: Account<'info, StakeAccount>,
 
-    /// Vault PDA token account
-    #[account(mut)]
+    /// [audit fix C-S2] vault must be owned by staking_pool PDA.
+    #[account(mut, constraint = vault_token_account.owner == staking_pool.key() @ ErrorCode::Unauthorized)]
     pub vault_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    /// [audit fix round2 R2-H-S1] reward_vault required so unstake can pay
+    /// out accrued rewards before closing. Constrained to staking_pool PDA.
+    #[account(mut, constraint = reward_vault.owner == staking_pool.key() @ ErrorCode::Unauthorized)]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    /// [audit fix H-S1] destination must be owned by the stake owner / signer.
+    #[account(mut, constraint = user_token_account.owner == user.key() @ ErrorCode::Unauthorized)]
     pub user_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: owner field validated by has_one
+    /// CHECK: cross-checked via has_one against stake_account.owner AND
+    /// constrained to equal `user.key()` so the AccountInfo can't be a third
+    /// party.
+    #[account(constraint = owner.key() == user.key() @ ErrorCode::Unauthorized)]
     pub owner: AccountInfo<'info>,
 
     #[account(mut)]
@@ -368,6 +630,7 @@ seeds = [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_byte
 }
 
 #[derive(Accounts)]
+#[instruction(stake_nonce: u64)]
 pub struct ClaimStakingReward<'info> {
     #[account(
         seeds = [b"staking_pool"],
@@ -375,23 +638,50 @@ pub struct ClaimStakingReward<'info> {
     )]
     pub staking_pool: Account<'info, StakingPool>,
 
+    /// [audit fix C-S1] PDA derived from stake_nonce argument.
+    /// [audit fix H-S2] has_one = user enforces that the signer owns the stake.
     #[account(
         mut,
-seeds = [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_bytes()],
+        seeds = [b"stake", user.key().as_ref(), stake_nonce.to_le_bytes().as_ref()],
         bump = stake_account.bump,
-        constraint = stake_account.amount > 0 @ ErrorCode::NothingStaked
+        has_one = owner @ ErrorCode::Unauthorized,
+        constraint = stake_account.owner == user.key() @ ErrorCode::Unauthorized,
+        constraint = stake_account.amount > 0 @ ErrorCode::NothingStaked,
     )]
     pub stake_account: Account<'info, StakeAccount>,
 
-    /// Reward vault
-    #[account(mut)]
+    /// [audit fix C-S3] reward_vault must be owned by the staking_pool PDA
+    /// (the only authority that can sign for transfers out of it).
+    #[account(mut, constraint = reward_vault.owner == staking_pool.key() @ ErrorCode::Unauthorized)]
     pub reward_vault: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    /// [audit fix H-S2] destination owned by stake owner.
+    #[account(mut, constraint = user_token_account.owner == user.key() @ ErrorCode::Unauthorized)]
     pub user_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: constrained to equal stake_account.owner via has_one + equals user.
+    #[account(constraint = owner.key() == user.key() @ ErrorCode::Unauthorized)]
+    pub owner: AccountInfo<'info>,
 
     pub user: Signer<'info>,
     pub token_program: Program<'info, Token>,
+}
+
+/// [audit fix R2-M-S2] Context for closing a fully-drained `StakeCounter`.
+/// Refunds rent to the owner.
+#[derive(Accounts)]
+pub struct CloseStakeCounter<'info> {
+    #[account(
+        mut,
+        seeds = [StakeCounter::SEED, user.key().as_ref()],
+        bump = stake_counter.bump,
+        has_one = user @ ErrorCode::Unauthorized,
+        close = user,
+    )]
+    pub stake_counter: Account<'info, StakeCounter>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -404,12 +694,17 @@ pub struct UpdateDailyRewards<'info> {
     )]
     pub staking_pool: Account<'info, StakingPool>,
 
-    #[account(mut)]
+    /// [audit fix C-S2] reward source bound to hardcoded protocol treasury.
+    #[account(mut, address = REWARD_SOURCE_TREASURY @ ErrorCode::Unauthorized)]
     pub reward_source: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    /// [audit fix C-S2] reward vault bound to the staking_pool PDA so it
+    /// can't be redirected to an attacker-owned account.
+    #[account(mut, constraint = reward_vault.owner == staking_pool.key() @ ErrorCode::Unauthorized)]
     pub reward_vault: Account<'info, TokenAccount>,
 
+    /// [audit fix C-S2 / H-S3] authority must equal hardcoded PROGRAM_ADMIN.
+    #[account(address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
     pub authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -422,6 +717,7 @@ pub struct StakeEvent {
     pub lockup_tier: LockupTier,
     pub multiplier_bps: u16,
     pub timestamp: i64,
+    pub stake_nonce: u64,
 }
 
 #[event]
@@ -453,4 +749,8 @@ pub enum ErrorCode {
     Unauthorized,
     #[msg("Nothing staked")]
     NothingStaked,
+    #[msg("Overflow")]
+    Overflow,
+    #[msg("Stake below minimum amount")]
+    StakeBelowMinimum,
 }

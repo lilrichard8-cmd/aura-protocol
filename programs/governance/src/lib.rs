@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::TokenAccount as SplTokenAccount;
+use anchor_spl::token::{self, Token, TokenAccount as SplTokenAccount, Transfer as SplTransfer};
 
 pub mod arbitration;
 pub use arbitration::*;
@@ -7,6 +7,27 @@ pub use arbitration::*;
 declare_id!("7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk");
 
 const MAX_VOTE_WEIGHT: u64 = 10_000;
+
+// =============================================================================
+// [audit fix C-G1] Hardcoded program admin. ⚠️ DO NOT DEPLOY — placeholder =
+// system_program::ID; replace with the real AURA multisig pubkey pre-mainnet.
+// Mirrors `market::PROGRAM_ADMIN` (bounty-V2 audit C-4).
+// =============================================================================
+pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [audit fix M-G4] Maximum number of arbiters allowed to vote on a single
+/// legacy dispute. Caps the unbounded vote count.
+pub const MAX_LEGACY_DISPUTE_VOTERS: u8 = 5;
+
+/// [audit fix M-G4] Absence penalty multiplier (basis points) applied to the
+/// arbiter's current ARS when they no-show on a trial. Previously a flat
+/// `-20` ARS hit which is too small to disincentivize bribes >20 ARS-worth.
+/// New formula: penalty = max(BASE_ABSENCE_ARS_PENALTY, current_ars * BPS / 10_000).
+/// At BPS=2500 (25%), a juror with ARS=300 now loses 75 instead of 20, and
+/// the penalty scales with rank — high-ARS jurors have more to lose, which
+/// is precisely the population whose absence damages dispute integrity most.
+pub const ABSENCE_PENALTY_BPS: i64 = 2500; // 25%
+pub const BASE_ABSENCE_ARS_PENALTY: i64 = 20;
 
 fn isqrt(n: u64) -> u64 {
     if n == 0 { return 0; }
@@ -20,14 +41,33 @@ fn isqrt(n: u64) -> u64 {
 pub mod aura_governance {
     use super::*;
 
-    // [audit fix C-21/C-22] accept ora_mint + quorum at initialization
+    // [audit fix C-21/C-22 + C-G1] accept ora_mint + quorum at initialization.
+    // [audit fix C-G1] Caller MUST equal hardcoded PROGRAM_ADMIN (see context).
+    // [audit fix C-G2] arbitration is disabled by default; only PROGRAM_ADMIN
+    // can flip `arbitration_enabled` after the deterministic-VRF limitation
+    // documented below is resolved by integrating a real VRF (Switchboard/ORAO).
     pub fn initialize_governance(ctx: Context<InitializeGovernance>, ora_mint: Pubkey, quorum: u64) -> Result<()> {
         let config = &mut ctx.accounts.governance_config;
         config.admin = ctx.accounts.admin.key();
         config.proposal_count = 0;
         config.ora_mint = ora_mint;
         config.quorum = quorum;
+        // [audit fix C-G2] gate arbitration off by default.
+        config.arbitration_enabled = false;
         config.bump = ctx.bumps.governance_config;
+        Ok(())
+    }
+
+    /// [audit fix C-G2] Flip the `arbitration_enabled` flag. Until a real VRF
+    /// (Switchboard / ORAO) is integrated, `select_trial1_jury` produces a
+    /// deterministic jury that is fully predictable from the public `slot`,
+    /// allowing a plaintiff to time their dispute filing for a favourable jury.
+    /// All arbitration instructions check this flag.
+    /// ONLY PROGRAM_ADMIN can flip this.
+    pub fn set_arbitration_enabled(ctx: Context<SetArbitrationEnabled>, enabled: bool) -> Result<()> {
+        let cfg = &mut ctx.accounts.governance_config;
+        cfg.arbitration_enabled = enabled;
+        msg!("Arbitration enabled = {}", enabled);
         Ok(())
     }
 
@@ -40,11 +80,29 @@ pub mod aura_governance {
         Ok(())
     }
 
+    /// [audit fix M-G3 / R2-M-G2] Admin can deactivate / reactivate a legacy
+    /// arbiter. Previously `is_active` was written `true` at register time
+    /// and never set `false` anywhere; a compromised or rotated arbiter
+    /// retained access to the legacy `vote_on_dispute` path forever.
+    pub fn set_arbiter_active(ctx: Context<SetArbiterActive>, active: bool) -> Result<()> {
+        let r = &mut ctx.accounts.arbiter_record;
+        r.is_active = active;
+        msg!("Arbiter {} active = {}", r.arbiter, active);
+        Ok(())
+    }
+
+    // [audit fix H-G1] title is no longer a PDA seed (was capped 32 bytes by
+    // Solana, but signature allowed up to 100 → DoS for long titles). The
+    // proposal PDA is now seeded by `governance_config.proposal_count`
+    // (monotonic id) instead.
     pub fn create_proposal(ctx: Context<CreateProposal>, title: String, description: String, committee_type: CommitteeType, proposal_type: ProposalType) -> Result<()> {
         require!(title.len() <= 100, ErrorCode::TitleTooLong);
         require!(description.len() <= 5000, ErrorCode::DescriptionTooLong);
         let p = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
+        // [audit fix L-G2] capture the assigned id (== current proposal_count)
+        let proposal_id = ctx.accounts.governance_config.proposal_count;
+        p.proposal_id = proposal_id;
         p.proposer = ctx.accounts.proposer.key(); p.title = title; p.description = description;
         p.committee_type = committee_type; p.proposal_type = proposal_type;
         p.status = ProposalStatus::Voting; p.votes_for = 0; p.votes_against = 0; p.total_votes = 0;
@@ -97,7 +155,29 @@ pub mod aura_governance {
         require!(signer == cfg.admin || signer == proposal.proposer, ErrorCode::Unauthorized);
         // [audit fix C-22] enforce quorum: total weighted votes must meet config.quorum
         require!(proposal.total_votes >= cfg.quorum, ErrorCode::QuorumNotReached);
+        // [audit fix H-G2] move to Passed or Failed; downstream `mark_executed`
+        // transitions to Executed so indexers can distinguish.
         proposal.status = if proposal.votes_for > proposal.votes_against { ProposalStatus::Passed } else { ProposalStatus::Failed };
+        Ok(())
+    }
+
+    /// [audit fix H-G2] explicit transition Passed -> Executed so indexers can
+    /// tell "vote concluded" from "on-chain side-effect applied".
+    pub fn mark_executed(ctx: Context<MarkExecuted>) -> Result<()> {
+        let cfg = &ctx.accounts.governance_config;
+        let proposal = &mut ctx.accounts.proposal;
+        let signer = ctx.accounts.authority.key();
+        require!(signer == cfg.admin || signer == proposal.proposer, ErrorCode::Unauthorized);
+        require!(proposal.status == ProposalStatus::Passed, ErrorCode::InvalidProposalStatus);
+        proposal.status = ProposalStatus::Executed;
+        Ok(())
+    }
+
+    /// [audit fix M-G2] Admin-gated quorum update.
+    pub fn update_quorum(ctx: Context<UpdateQuorum>, new_quorum: u64) -> Result<()> {
+        let cfg = &mut ctx.accounts.governance_config;
+        cfg.quorum = new_quorum;
+        msg!("Quorum updated to {}", new_quorum);
         Ok(())
     }
 
@@ -119,6 +199,13 @@ pub mod aura_governance {
     /// ⚠️ [audit fix C-23] DEPRECATED — superseded by Arbitration Trial 1/2 jury voting (§13.8).
     /// Retained for backward compatibility; new disputes MUST go through `submit_trial1_ruling` /
     /// `submit_trial2_ruling`.
+    ///
+    /// [audit fix C-G3 replacement] Per-(dispute, voter) vote PDA + total
+    /// voter cap (`MAX_LEGACY_DISPUTE_VOTERS = 5`). Combined with `has_one`
+    /// on `arbiter_record.arbiter`, an arbiter cannot vote twice and a
+    /// colluding admin can't stuff with sock-puppets beyond the cap.
+    /// [audit fix C-G3 replacement] Also prevents the dispute target from
+    /// voting on themselves.
     pub fn vote_on_dispute(ctx: Context<VoteOnDispute>, vote_guilty: bool) -> Result<()> {
         msg!("[DEPRECATED] vote_on_dispute: use submit_trial1_ruling / submit_trial2_ruling.");
         require!(ctx.accounts.arbiter_record.is_active, ErrorCode::ArbiterNotActive);
@@ -128,10 +215,18 @@ pub mod aura_governance {
         let now_ts = Clock::get()?.unix_timestamp;
         let dispute = &mut ctx.accounts.dispute;
         require!(dispute.status == OldDisputeStatus::UnderReview, ErrorCode::DisputeAlreadyResolved);
-        if vote_guilty { dispute.votes_guilty += 1; } else { dispute.votes_innocent += 1; }
-        if (dispute.votes_guilty + dispute.votes_innocent) >= 4 {
+        // [audit fix C-G3 replacement] target cannot vote on their own case.
+        require!(dispute.target_user != arbiter_key, ErrorCode::Unauthorized);
+        // [audit fix C-G3 replacement] hard cap total votes.
+        let total_votes_after = (dispute.votes_guilty as u16) + (dispute.votes_innocent as u16) + 1;
+        require!(total_votes_after <= MAX_LEGACY_DISPUTE_VOTERS as u16, ErrorCode::DisputeVoterCapReached);
+        if vote_guilty { dispute.votes_guilty = dispute.votes_guilty.checked_add(1).ok_or(ErrorCode::Overflow)?; }
+        else { dispute.votes_innocent = dispute.votes_innocent.checked_add(1).ok_or(ErrorCode::Overflow)?; }
+        if (dispute.votes_guilty + dispute.votes_innocent) >= MAX_LEGACY_DISPUTE_VOTERS {
             dispute.status = if dispute.votes_guilty > dispute.votes_innocent { OldDisputeStatus::Guilty } else { OldDisputeStatus::Innocent };
         }
+        // The `init` on dispute_vote PDA `[b"dispute_vote", dispute, arbiter]`
+        // already prevents the same arbiter voting twice (re-init fails).
         let dv = &mut ctx.accounts.dispute_vote;
         dv.arbiter = arbiter_key; dv.dispute = dispute_key;
         dv.vote_guilty = vote_guilty; dv.voted_at = now_ts; dv.bump = bump_dv;
@@ -153,21 +248,60 @@ pub mod aura_governance {
         Ok(())
     }
 
+    /// [audit fix round2 R2-C-G1] One-time init of the protocol arbiter
+    /// stake vault (token account whose authority is `arbitrator_registry`).
+    /// Must be called once by PROGRAM_ADMIN after `init_arbitrator_registry`.
+    pub fn init_arbiter_stake_vault(_ctx: Context<InitArbiterStakeVaultCtx>) -> Result<()> {
+        msg!("Arbiter stake vault initialised");
+        Ok(())
+    }
+
+    /// [audit fix round2 R2-C-G1] Real-stake arbitrator registration.
+    /// - `user_ora_account` is now bound to `owner == user.key()` and
+    ///   `mint == governance_config.ora_mint` via account constraints.
+    /// - The mandated `MIN_STAKE_LAMPORTS` of ORA is CPI-transferred from the
+    ///   user into a program-owned escrow ATA (`arbiter_stake_vault`) whose
+    ///   authority is the `arbitrator_registry` PDA. The recorded
+    ///   `staked_ora_lamports` is the exact amount escrowed, not a snapshot
+    ///   of an attacker-supplied ATA.
+    /// - Future slashing paths debit this escrow; we no longer trust the
+    ///   arbiter's spending wallet to retain collateral.
     pub fn register_as_arbitrator(ctx: Context<RegisterAsArbitratorCtx>) -> Result<()> {
-        let reg = &mut ctx.accounts.arbitrator_registry;
         let user_key = ctx.accounts.user.key();
-        require!(!reg.arbitrators.iter().any(|a| a.user == user_key), ArbitrationError::AlreadyRegistered);
-        require!(reg.arbitrators.len() < MAX_ARBITRATORS, ArbitrationError::RegistryFull);
-        let stake = ctx.accounts.user_ora_account.amount;
-        require!(stake >= MIN_STAKE_LAMPORTS, ArbitrationError::InsufficientStake);
+        {
+            let reg = &ctx.accounts.arbitrator_registry;
+            require!(!reg.arbitrators.iter().any(|a| a.user == user_key), ArbitrationError::AlreadyRegistered);
+            require!(reg.arbitrators.len() < MAX_ARBITRATORS, ArbitrationError::RegistryFull);
+        }
+        // [audit fix round2 R2-C-G1] enforce real ORA balance available
+        require!(ctx.accounts.user_ora_account.amount >= MIN_STAKE_LAMPORTS, ArbitrationError::InsufficientStake);
+
+        // [audit fix round2 R2-C-G1] CPI-transfer MIN_STAKE_LAMPORTS into
+        // protocol-owned escrow.
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                SplTransfer {
+                    from: ctx.accounts.user_ora_account.to_account_info(),
+                    to: ctx.accounts.arbiter_stake_vault.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            MIN_STAKE_LAMPORTS,
+        )?;
+
         let slot = Clock::get()?.slot;
-        reg.arbitrators.push(Arbitrator { user: user_key, ars: 0, staked_ora_lamports: stake, joined_at_slot: slot, is_in_other_committee: false, last_penalty_slot: None, excluded_until_slot: None });
+        let reg = &mut ctx.accounts.arbitrator_registry;
+        reg.arbitrators.push(Arbitrator { user: user_key, ars: 0, staked_ora_lamports: MIN_STAKE_LAMPORTS, joined_at_slot: slot, is_in_other_committee: false, last_penalty_slot: None, excluded_until_slot: None });
         reg.total_pool_size += 1;
         emit!(ArbitratorRegistered { user: user_key, slot });
         Ok(())
     }
 
     pub fn file_arbitration_dispute(ctx: Context<FileArbitrationDisputeCtx>, redemption_id: u64, coin_mint: Pubkey, defendant: Pubkey) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate dispute filing on arbitration_enabled
+        // to prevent rent-griefing while VRF is still off.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let ag = &mut ctx.accounts.arbitration_governance;
         let id = ag.dispute_count;
         ag.dispute_count = id.checked_add(1).ok_or(ArbitrationError::Overflow)?;
@@ -186,6 +320,12 @@ pub mod aura_governance {
     }
 
     pub fn select_trial1_jury(ctx: Context<SelectTrial1JuryCtx>, dispute_id: u64) -> Result<()> {
+        // [audit fix C-G2] arbitration gated off until real VRF is integrated.
+        // The pseudo-VRF below (LCG seeded by `slot`) is fully predictable; a
+        // plaintiff/defendant can pick the favourable slot to file/select.
+        // Toggle `arbitration_enabled` via `set_arbitration_enabled` ONLY after
+        // Switchboard / ORAO VRF integration is complete.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let d = &mut ctx.accounts.arb_dispute;
         require!(d.status == DisputeStatus::Filed, ArbitrationError::InvalidDisputeStatus);
         let reg = &ctx.accounts.arbitrator_registry;
@@ -212,9 +352,14 @@ pub mod aura_governance {
     }
 
     pub fn submit_trial1_ruling(ctx: Context<SubmitTrial1RulingCtx>, dispute_id: u64, vote: Ruling, reasoning_uri: String) -> Result<()> {
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         require!(reasoning_uri.len() <= 200, ArbitrationError::UriTooLong);
+        // [audit fix C-G3] sanity check the instruction-arg dispute_id matches
+        // the loaded account's stored id (defence-in-depth — the seed check
+        // already binds them, but explicit is better).
         let juror_key = ctx.accounts.juror.key();
         let d = &mut ctx.accounts.arb_dispute;
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         require!(d.status == DisputeStatus::Trial1JurySelected || d.status == DisputeStatus::Trial1Pending, ArbitrationError::InvalidDisputeStatus);
         require!(d.trial1_jury.contains(&juror_key), ArbitrationError::NotAJuror);
         require!(!d.trial1_rulings.iter().any(|r| r.juror == juror_key), ArbitrationError::AlreadyRuled);
@@ -226,7 +371,10 @@ pub mod aura_governance {
     }
 
     pub fn finalize_trial1(ctx: Context<FinalizeTrial1Ctx>, dispute_id: u64) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate finalize on arbitration_enabled.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let d = &mut ctx.accounts.arb_dispute;
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         require!(d.status == DisputeStatus::Trial1Pending, ArbitrationError::InvalidDisputeStatus);
         let slot = Clock::get()?.slot;
         require!(d.trial1_rulings.len() >= TRIAL1_JURY_SIZE || slot >= d.trial1_deadline_slot, ArbitrationError::TrialNotDeadlined);
@@ -240,7 +388,10 @@ pub mod aura_governance {
     }
 
     pub fn appeal_to_trial2(ctx: Context<AppealToTrial2Ctx>, dispute_id: u64) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate appeals on arbitration_enabled.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let d = &mut ctx.accounts.arb_dispute;
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         require!(d.status == DisputeStatus::Trial1Concluded, ArbitrationError::InvalidDisputeStatus);
         let slot = Clock::get()?.slot;
         let deadline = d.appeal_deadline_slot.ok_or(ArbitrationError::InvalidDisputeStatus)?;
@@ -250,7 +401,10 @@ pub mod aura_governance {
     }
 
     pub fn select_trial2_panel(ctx: Context<SelectTrial2PanelCtx>, dispute_id: u64) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate trial-2 selection on arbitration_enabled.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let d = &mut ctx.accounts.arb_dispute;
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         require!(d.status == DisputeStatus::Trial1Concluded, ArbitrationError::InvalidDisputeStatus);
         let reg = &ctx.accounts.arbitrator_registry;
         let slot = Clock::get()?.slot;
@@ -268,9 +422,12 @@ pub mod aura_governance {
     }
 
     pub fn submit_trial2_ruling(ctx: Context<SubmitTrial2RulingCtx>, dispute_id: u64, vote: Ruling, reasoning_uri: String) -> Result<()> {
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         require!(reasoning_uri.len() <= 200, ArbitrationError::UriTooLong);
         let juror_key = ctx.accounts.juror.key();
         let d = &mut ctx.accounts.arb_dispute;
+        // [audit fix C-G3] explicit id check (defence-in-depth)
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         require!(d.status == DisputeStatus::Trial2PanelSelected || d.status == DisputeStatus::Trial2Pending, ArbitrationError::InvalidDisputeStatus);
         let panel = d.trial2_panel.ok_or(ArbitrationError::InvalidDisputeStatus)?;
         require!(panel.contains(&juror_key), ArbitrationError::NotAJuror);
@@ -282,7 +439,10 @@ pub mod aura_governance {
     }
 
     pub fn finalize_dispute(ctx: Context<FinalizeDisputeCtx>, dispute_id: u64) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate full-finalize on arbitration_enabled.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
         let d = &mut ctx.accounts.arb_dispute;
+        require!(d.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         let slot = Clock::get()?.slot;
         if d.status == DisputeStatus::Trial1Concluded {
             let deadline = d.appeal_deadline_slot.ok_or(ArbitrationError::InvalidDisputeStatus)?;
@@ -302,6 +462,10 @@ pub mod aura_governance {
     }
 
     pub fn dissolve_panel_for_absence(ctx: Context<DissolvePanelCtx>, dispute_id: u64) -> Result<()> {
+        // [audit fix round2 R2-H-G1] gate absence-slashing on arbitration_enabled
+        // so honest jurors are not penalised when the gate was flipped mid-flow.
+        require!(ctx.accounts.governance_config.arbitration_enabled, ArbitrationError::ArbitrationDisabled);
+        require!(ctx.accounts.arb_dispute.id == dispute_id, ArbitrationError::InvalidDisputeStatus);
         let slot = Clock::get()?.slot;
         let status = ctx.accounts.arb_dispute.status.clone();
         let deadline = if status == DisputeStatus::Trial1Pending { ctx.accounts.arb_dispute.trial1_deadline_slot }
@@ -319,7 +483,14 @@ pub mod aura_governance {
             if *juror == Pubkey::default() { continue; }
             if !ruled.contains(juror) {
                 if let Some(arb) = reg.arbitrators.iter_mut().find(|a| a.user == *juror) {
-                    arb.ars = arb.ars.saturating_sub(20);
+                    // [audit fix M-G4] scaled absence penalty (max of flat
+                    // base or `current_ars * 25%`) — disincentivises bribes
+                    // > 20 ARS-worth and scales with the juror's rank.
+                    let scaled = (arb.ars as i64)
+                        .saturating_mul(ABSENCE_PENALTY_BPS)
+                        .saturating_div(10_000);
+                    let penalty = scaled.max(BASE_ABSENCE_ARS_PENALTY) as u64;
+                    arb.ars = arb.ars.saturating_sub(penalty);
                     arb.excluded_until_slot = Some(slot + ABSENCE_PENALTY_SLOTS);
                     arb.last_penalty_slot = Some(slot);
                 }
@@ -334,14 +505,15 @@ pub mod aura_governance {
 // [audit fix C-21/C-22] add ora_mint + quorum to GovernanceConfig
 #[account]
 pub struct GovernanceConfig {
-    pub admin: Pubkey,        // 32
-    pub proposal_count: u64,  // 8
-    pub ora_mint: Pubkey,     // 32 — voters' ORA token accounts must match this mint
-    pub quorum: u64,          // 8 — minimum total_votes weight required to execute
-    pub bump: u8,             // 1
+    pub admin: Pubkey,             // 32
+    pub proposal_count: u64,       // 8
+    pub ora_mint: Pubkey,          // 32 — voters' ORA token accounts must match this mint
+    pub quorum: u64,               // 8 — minimum total_votes weight required to execute
+    pub arbitration_enabled: bool, // 1 — [audit fix C-G2] gate flag
+    pub bump: u8,                  // 1
 }
 #[account] pub struct ArbiterRecord { pub arbiter: Pubkey, pub registered_at: i64, pub is_active: bool, pub bump: u8 }
-#[account] pub struct Proposal { pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
+#[account] pub struct Proposal { pub proposal_id: u64, pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
 #[account] pub struct VoteRecord { pub voter: Pubkey, pub proposal: Pubkey, pub vote_for: bool, pub vote_weight: u64, pub voted_at: i64, pub bump: u8 }
 #[account] pub struct Dispute { pub plaintiff: Pubkey, pub target_user: Pubkey, pub evidence_uri: String, pub dispute_type: DisputeType, pub status: OldDisputeStatus, pub votes_guilty: u8, pub votes_innocent: u8, pub created_at: i64, pub bump: u8 }
 #[account] pub struct DisputeVote { pub arbiter: Pubkey, pub dispute: Pubkey, pub vote_guilty: bool, pub voted_at: i64, pub bump: u8 }
@@ -354,10 +526,35 @@ pub struct GovernanceConfig {
 
 // === Contexts ===
 #[derive(Accounts)] pub struct InitializeGovernance<'info> {
-    // [audit fix C-21/C-22] expanded space for ora_mint + quorum
-    #[account(init, payer = admin, space = 8+32+8+32+8+1, seeds = [b"governance_config"], bump)]
+    // [audit fix C-21/C-22 + C-G2] expanded space for ora_mint + quorum + arbitration_enabled
+    #[account(init, payer = admin, space = 8+32+8+32+8+1+1, seeds = [b"governance_config"], bump)]
     pub governance_config: Account<'info, GovernanceConfig>,
-    #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
+    // [audit fix C-G1] caller MUST equal hardcoded PROGRAM_ADMIN.
+    #[account(mut, address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)] pub struct SetArbitrationEnabled<'info> {
+    #[account(mut, seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    // [audit fix C-G2] only the hardcoded PROGRAM_ADMIN can flip the gate.
+    #[account(address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)] pub struct UpdateQuorum<'info> {
+    #[account(mut, seeds = [b"governance_config"], bump = governance_config.bump,
+        has_one = admin @ ErrorCode::Unauthorized)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)] pub struct MarkExecuted<'info> {
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    #[account(mut)] pub proposal: Account<'info, Proposal>,
+    pub authority: Signer<'info>,
 }
 #[derive(Accounts)] pub struct RegisterArbiter<'info> {
     #[account(seeds = [b"governance_config"], bump = governance_config.bump, has_one = admin @ ErrorCode::Unauthorized)]
@@ -368,10 +565,30 @@ pub struct GovernanceConfig {
     pub arbiter: AccountInfo<'info>,
     #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
-#[derive(Accounts)] #[instruction(title: String)] pub struct CreateProposal<'info> {
+
+/// [audit fix M-G3 / R2-M-G2] Admin-gated activation toggle for the legacy
+/// arbiter record. Mirrors the `has_one = admin` pattern used by
+/// `register_arbiter` so only the governance admin can deactivate legacy
+/// arbiters.
+#[derive(Accounts)] pub struct SetArbiterActive<'info> {
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump, has_one = admin @ ErrorCode::Unauthorized)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    #[account(mut, seeds = [b"arbiter", arbiter_record.arbiter.as_ref()], bump = arbiter_record.bump)]
+    pub arbiter_record: Account<'info, ArbiterRecord>,
+    pub admin: Signer<'info>,
+}
+#[derive(Accounts)] pub struct CreateProposal<'info> {
     #[account(mut, seeds = [b"governance_config"], bump = governance_config.bump)]
     pub governance_config: Account<'info, GovernanceConfig>,
-    #[account(init, payer = proposer, space = 8+32+104+5004+1+1+1+8+8+8+8+8+1, seeds = [b"proposal", proposer.key().as_ref(), title.as_bytes()], bump)]
+    // [audit fix H-G1] PDA seeded by monotonic `proposal_count` (NOT title).
+    // Anchor evaluates `governance_config.proposal_count` at constraint time,
+    // BEFORE the function body increments it. So a fresh proposal uses the
+    // current counter value as its id, and the next call sees the incremented
+    // value.
+    #[account(init, payer = proposer,
+        space = 8+8+32+104+5004+1+1+1+8+8+8+8+8+1,
+        seeds = [b"proposal", governance_config.proposal_count.to_le_bytes().as_ref()],
+        bump)]
     pub proposal: Account<'info, Proposal>,
     #[account(mut)] pub proposer: Signer<'info>, pub system_program: Program<'info, System>,
 }
@@ -418,11 +635,61 @@ pub struct GovernanceConfig {
     pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
     #[account(mut)] pub admin: Signer<'info>, pub system_program: Program<'info, System>,
 }
+// [audit fix round2 R2-C-G1] Stake-escrow context: bind user_ora_account by
+// owner+mint, require an arbiter_stake_vault PDA owned by the registry, and
+// thread the canonical governance_config so `ora_mint` is enforced.
 #[derive(Accounts)] pub struct RegisterAsArbitratorCtx<'info> {
     #[account(mut, seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
     pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    /// [audit fix round2 R2-C-G1] user's source ORA ATA — must be owned by
+    /// the signer and match the canonical ORA mint.
+    #[account(
+        mut,
+        constraint = user_ora_account.owner == user.key() @ ArbitrationError::Unauthorized,
+        constraint = user_ora_account.mint == governance_config.ora_mint @ ArbitrationError::Unauthorized,
+    )]
     pub user_ora_account: Account<'info, SplTokenAccount>,
+    /// [audit fix round2 R2-C-G1] Protocol-owned escrow ATA. Authority is the
+    /// `arbitrator_registry` PDA so only this program can move funds out
+    /// (e.g., on slashing). Mint pinned to ora_mint.
+    #[account(
+        mut,
+        seeds = [b"arb-stake-vault"],
+        bump,
+        constraint = arbiter_stake_vault.owner == arbitrator_registry.key() @ ArbitrationError::Unauthorized,
+        constraint = arbiter_stake_vault.mint == governance_config.ora_mint @ ArbitrationError::Unauthorized,
+    )]
+    pub arbiter_stake_vault: Account<'info, SplTokenAccount>,
     #[account(mut)] pub user: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
+// [audit fix round2 R2-C-G1] one-time init of the protocol arbiter stake
+// vault. PROGRAM_ADMIN-gated so an attacker cannot pre-create the vault with
+// a hostile authority.
+#[derive(Accounts)] pub struct InitArbiterStakeVaultCtx<'info> {
+    #[account(seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
+    pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
+    #[account(address = governance_config.ora_mint @ ArbitrationError::Unauthorized)]
+    pub ora_mint: Account<'info, anchor_spl::token::Mint>,
+    #[account(
+        init,
+        payer = admin,
+        token::mint = ora_mint,
+        token::authority = arbitrator_registry,
+        seeds = [b"arb-stake-vault"],
+        bump,
+    )]
+    pub arbiter_stake_vault: Account<'info, SplTokenAccount>,
+    #[account(mut, address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub admin: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
 #[derive(Accounts)] #[instruction(redemption_id: u64, coin_mint: Pubkey, defendant: Pubkey)]
 pub struct FileArbitrationDisputeCtx<'info> {
@@ -430,6 +697,9 @@ pub struct FileArbitrationDisputeCtx<'info> {
     pub arbitration_governance: Account<'info, ArbitrationGovernance>,
     #[account(init, payer = plaintiff, space = ArbitrationDispute::SIZE, seeds = [b"arb-dispute", arbitration_governance.dispute_count.to_le_bytes().as_ref()], bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     #[account(mut)] pub plaintiff: Signer<'info>, pub system_program: Program<'info, System>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SelectTrial1JuryCtx<'info> {
@@ -437,21 +707,33 @@ pub struct FileArbitrationDisputeCtx<'info> {
     pub arb_dispute: Account<'info, ArbitrationDispute>,
     #[account(seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
     pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    // [audit fix C-G2] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub caller: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SubmitTrial1RulingCtx<'info> {
     #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix C-G2] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub juror: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct FinalizeTrial1Ctx<'info> {
     #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub caller: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct AppealToTrial2Ctx<'info> {
     #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub appellant: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SelectTrial2PanelCtx<'info> {
@@ -459,16 +741,25 @@ pub struct FileArbitrationDisputeCtx<'info> {
     pub arb_dispute: Account<'info, ArbitrationDispute>,
     #[account(seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
     pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub caller: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct SubmitTrial2RulingCtx<'info> {
     #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix C-G2] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub juror: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct FinalizeDisputeCtx<'info> {
     #[account(mut, seeds = [b"arb-dispute", dispute_id.to_le_bytes().as_ref()], bump = arb_dispute.bump)]
     pub arb_dispute: Account<'info, ArbitrationDispute>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub caller: Signer<'info>,
 }
 #[derive(Accounts)] #[instruction(dispute_id: u64)] pub struct DissolvePanelCtx<'info> {
@@ -476,6 +767,9 @@ pub struct FileArbitrationDisputeCtx<'info> {
     pub arb_dispute: Account<'info, ArbitrationDispute>,
     #[account(mut, seeds = [b"arb-registry"], bump = arbitrator_registry.bump)]
     pub arbitrator_registry: Account<'info, ArbitratorRegistry>,
+    // [audit fix round2 R2-H-G1] arbitration_enabled gate.
+    #[account(seeds = [b"governance_config"], bump = governance_config.bump)]
+    pub governance_config: Account<'info, GovernanceConfig>,
     pub caller: Signer<'info>,
 }
 
@@ -495,4 +789,5 @@ pub enum ErrorCode {
     #[msg("Arbiter not active")] ArbiterNotActive,
     #[msg("Overflow")] Overflow,
     #[msg("Quorum not reached")] QuorumNotReached,
+    #[msg("Legacy dispute voter cap reached")] DisputeVoterCapReached,
 }

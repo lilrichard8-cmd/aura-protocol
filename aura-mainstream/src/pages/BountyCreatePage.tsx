@@ -30,6 +30,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/context/ToastContext';
 import { useMockChain } from '@/context/MockChainContext';
+import { useBountyContract } from '@/hooks/useBountyContract';
 
 type UploadedFile = { id: string; name: string; size: string };
 
@@ -53,6 +54,7 @@ export default function BountyCreatePage() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const mockChain = useMockChain();
+  const onChain = useBountyContract();
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -115,8 +117,31 @@ export default function BountyCreatePage() {
       if (uploaded.length) meta.push(`Reference files: ${uploaded.map(f => f.name).join(', ')}`);
       const enrichedDesc = description.trim() + '\n\n— — —\n' + meta.join('\n');
 
-      await mockChain.createBounty(title.trim(), enrichedDesc, rewardNum);
-      showToast('success', `Bounty posted`, `${rewardNum} ORA escrowed. Open it in Studio → Bounties.`);
+      if (onChain.enabled && onChain.module) {
+        // Real on-chain path. The wallet adapter must be connected.
+        const sponsor = (onChain.module as any).wallet?.publicKey;
+        if (!sponsor) throw new Error('Connect a Solana wallet first.');
+        const bountyId = await onChain.module.nextBountyId(sponsor);
+        const deadline = Math.floor(Date.now() / 1000) + deadlineDays * 86400;
+        // Use the trimmed title verbatim; brief + metadata go into the URI.
+        // For now we encode the enriched description inline via data URL.
+        const metadataUri = `data:text/plain;base64,${btoa(unescape(encodeURIComponent(enrichedDesc))).slice(0, 200)}`;
+        const res = await onChain.module.createBounty({
+          bountyId,
+          totalReward: BigInt(rewardNum) * 1_000_000_000n, // assume 9 decimals
+          maxWinners: 1, // UI currently doesn't surface this; default 1
+          deadline,
+          title: title.trim().slice(0, 80),
+          metadataUri,
+          paymentMint: onChain.oraMint,
+          isOfficial: false,
+        });
+        if (!res.success) throw new Error(res.error || 'on-chain create failed');
+        showToast('success', 'Bounty posted on-chain', `${rewardNum} ORA escrowed. tx: ${res.signature.slice(0, 8)}…`);
+      } else {
+        await mockChain.createBounty(title.trim(), enrichedDesc, rewardNum);
+        showToast('success', `Bounty posted`, `${rewardNum} ORA escrowed. Open it in Studio → Bounties.`);
+      }
       navigate('/studio?tab=bounties');
     } catch (e: any) {
       showToast('error', 'Failed to post bounty', e?.message || 'Try again.');

@@ -3,21 +3,80 @@ use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
 
 pub mod sell_order;
 pub mod buy_order;
+pub mod bounty_v2;
+pub mod bounty_v2_ix;
 
 pub use sell_order::*;
 pub use buy_order::*;
+pub use bounty_v2::*;
+pub use bounty_v2_ix::*;
 
 declare_id!("5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV");
 
-/// [audit fix C-6/C-20] Hardcoded protocol fee pools.
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║  ⚠️ ⚠️ ⚠️  DO NOT DEPLOY TO MAINNET  ⚠️ ⚠️ ⚠️                              ║
+// ║                                                                      ║
+// ║  All of the protocol-pool / mint / admin constants below are         ║
+// ║  placeholders set to `system_program::ID`. Deploying the program    ║
+// ║  with these placeholders bricks ALL revenue-generating instructions  ║
+// ║  (fill_sell_order, fill_buy_order, award_submission, …) because the ║
+// ║  `address = ...` constraints can never be satisfied.                ║
+// ║                                                                      ║
+// ║  Before mainnet:                                                     ║
+// ║    1. Replace every constant below with the real protocol pubkey.   ║
+// ║    2. Confirm `cargo test --features mainnet-check` (see             ║
+// ║       `require_real_pools_configured` runtime guard) passes locally. ║
+// ║    3. Audit retest required.                                         ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+
+/// [audit fix C-6/C-20] Hardcoded protocol fee pools (ORA-denominated).
 /// ⚠️ DO NOT DEPLOY — placeholder = system program ID; replace with real protocol PDAs pre-mainnet.
 pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 
+/// [Bounty V2 audit fix C-2] Canonical token mints.
+/// ⚠️ DO NOT DEPLOY — placeholders. Replace with real ORA/USDC mints pre-mainnet.
+pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const USDC_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [Bounty V2 audit fix C-4] Program admin allowed to initialise / rotate
+/// the OfficialBountyAuthority. Prevents front-run init attacks.
+/// ⚠️ DO NOT DEPLOY — placeholder. Replace with real multisig pubkey pre-mainnet.
+pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [Bounty V2 audit fix H-2] USDC-denominated protocol fee pools.
+/// Separate from ORA pools because token accounts hold one mint each.
+/// ⚠️ DO NOT DEPLOY — placeholders. Replace with real USDC treasury accounts.
+pub const STAKING_REWARDS_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const GAS_RESERVE_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const OPS_TREASURY_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [audit fix M-C4] Runtime guard that aborts revenue-generating instructions
+/// when the placeholder protocol-pool constants haven't been replaced with real
+/// pubkeys. Belt-and-suspenders: the `address = ...` constraints already block
+/// this path, but a clear `PlaceholderProtocolPools` error beats Anchor's
+/// generic `AccountNotInitialized`.
+fn require_real_pools_configured() -> Result<()> {
+    let placeholder = anchor_lang::solana_program::system_program::ID;
+    require!(
+        STAKING_REWARDS_POOL != placeholder
+            && GAS_RESERVE_POOL != placeholder
+            && OPS_TREASURY_POOL != placeholder
+            && ORA_MINT != placeholder,
+        ErrorCode::PlaceholderProtocolPools
+    );
+    Ok(())
+}
+
 #[program]
 pub mod aura_market {
     use super::*;
+    use crate::bounty_v2_ix::{
+        InitOfficialAuthority, RotateOfficialAuthority, InitBountyCounter,
+        CreateBountyV2, SubmitToBounty, AwardSubmission, RejectSubmission,
+        CloseBountyCommon, RefundExpiredCtx,
+    };
 
     // ===== Existing NFT Marketplace =====
 
@@ -39,57 +98,28 @@ pub mod aura_market {
         Ok(())
     }
 
-    pub fn create_bounty(ctx: Context<CreateBounty>, title: String, description: String, reward_amount: u64, deadline: i64) -> Result<()> {
-        require!(title.len() <= 100, ErrorCode::TitleTooLong);
-        require!(description.len() <= 1000, ErrorCode::DescriptionTooLong);
-        require!(reward_amount > 0, ErrorCode::InvalidAmount);
-        let bounty = &mut ctx.accounts.bounty;
-        bounty.creator = ctx.accounts.creator.key();
-        bounty.title = title; bounty.description = description;
-        bounty.reward_amount = reward_amount; bounty.deadline = deadline;
-        bounty.status = BountyStatus::Open; bounty.submission_count = 0;
-        bounty.winner = Pubkey::default(); bounty.created_at = Clock::get()?.unix_timestamp;
-        bounty.bump = ctx.bumps.bounty;
-        Ok(())
-    }
+    // [audit fix M-C1] DELETED: old `create_bounty` / `submit_bounty_work` /
+    // `award_bounty` stubs. They recorded a bounty + winner on-chain but
+    // NEVER escrowed or transferred any tokens — a working scam-by-default.
+    // All bounty flows now go through `bv2_*` instructions below, which
+    // properly escrow funds and run the audited 5% protocol-fee split.
+    //
+    // [audit fix M-C2] DELETED: old `grant_license`. It allowed any licensor
+    // to mint an on-chain "license" naming any wallet as licensee with no
+    // licensee signature — an identity-squatting / on-chain-spam vector.
+    // License agreements should be tracked off-chain or via a new instruction
+    // that requires `licensee: Signer<'info>`.
+    //
+    // [audit fix M-C3] DELETED: old `place_ad_bid`. It recorded a bid amount
+    // on-chain without escrowing any tokens — a Potemkin auction. Re-add
+    // later with real ORA escrow + a `settle_ad_bid` finalisation step
+    // mirroring `bounty_v2_ix::refund_and_close`.
 
-    pub fn submit_bounty_work(ctx: Context<SubmitBountyWork>, submission_uri: String) -> Result<()> {
-        require!(submission_uri.len() <= 200, ErrorCode::UriTooLong);
-        let bounty = &mut ctx.accounts.bounty;
-        require!(bounty.status == BountyStatus::Open, ErrorCode::BountyNotOpen);
-        require!(Clock::get()?.unix_timestamp < bounty.deadline, ErrorCode::BountyExpired);
-        bounty.submission_count = bounty.submission_count.checked_add(1).ok_or(ErrorCode::Overflow)?;
-        Ok(())
-    }
-
-    pub fn award_bounty(ctx: Context<AwardBounty>) -> Result<()> {
-        let bounty = &mut ctx.accounts.bounty;
-        require!(bounty.status == BountyStatus::Open, ErrorCode::BountyNotOpen);
-        bounty.status = BountyStatus::Completed;
-        bounty.winner = ctx.accounts.winner.key();
-        Ok(())
-    }
-
-    pub fn grant_license(ctx: Context<GrantLicense>, royalty_bps: u16) -> Result<()> {
-        require!(royalty_bps <= 10000, ErrorCode::InvalidRoyalty);
-        let license = &mut ctx.accounts.license;
-        license.licensor = ctx.accounts.licensor.key();
-        license.licensee = ctx.accounts.licensee.key();
-        license.royalty_bps = royalty_bps;
-        license.granted_at = Clock::get()?.unix_timestamp;
-        license.is_active = true;
-        license.bump = ctx.bumps.license;
-        Ok(())
-    }
-
-    pub fn place_ad_bid(ctx: Context<PlaceAdBid>, bid_amount: u64, target_slot: u8) -> Result<()> {
-        require!(bid_amount > 0, ErrorCode::InvalidAmount);
-        let ad_bid = &mut ctx.accounts.ad_bid;
-        ad_bid.bidder = ctx.accounts.bidder.key();
-        ad_bid.bid_amount = bid_amount; ad_bid.target_slot = target_slot;
-        ad_bid.is_active = true; ad_bid.created_at = Clock::get()?.unix_timestamp;
-        ad_bid.bump = ctx.bumps.ad_bid;
-        Ok(())
+    /// Helper that any front-end can call before the first revenue-bearing
+    /// instruction to surface the placeholder-pools deploy-blocker as a
+    /// clean error instead of `AccountNotInitialized`. [audit fix M-C4]
+    pub fn assert_pools_configured(_ctx: Context<NoopCtx>) -> Result<()> {
+        require_real_pools_configured()
     }
 
     // ===== Sell Order (Task #2) =====
@@ -103,6 +133,9 @@ pub mod aura_market {
     pub fn place_sell_order(ctx: Context<PlaceSellOrderCtx>, amount: u64, price_per_coin: u64) -> Result<()> {
         require!(amount > 0, SellOrderError::InvalidAmount);
         require!(price_per_coin > 0, SellOrderError::InvalidPrice);
+        // [audit fix M-C4] surface the placeholder-pools deploy-blocker as a
+        // clean error so off-chain ops catch it before tx submission.
+        require_real_pools_configured()?;
 
         let counter = &mut ctx.accounts.sell_order_counter;
         let id = counter.count;
@@ -244,6 +277,8 @@ pub mod aura_market {
     pub fn place_buy_order(ctx: Context<PlaceBuyOrderCtx>, amount_wanted: u64, price_per_coin: u64) -> Result<()> {
         require!(amount_wanted > 0, BuyOrderError::InvalidAmount);
         require!(price_per_coin > 0, BuyOrderError::InvalidPrice);
+        // [audit fix M-C4] same guard as in place_sell_order.
+        require_real_pools_configured()?;
 
         let base_cost = (amount_wanted as u128).checked_mul(price_per_coin as u128).ok_or(BuyOrderError::Overflow)?
             .checked_div(1_000_000_000).ok_or(BuyOrderError::Overflow)? as u64;
@@ -389,16 +424,63 @@ pub mod aura_market {
         emit!(BuyOrderFilled { id, seller: ctx.accounts.seller.key(), fill_amount: actual_fill, total_cost, fee: fee_total, fully_filled, remaining_after, slot });
         Ok(())
     }
+
+    // ===== Bounty V2 (multi-winner escrow, ORA + USDC) =====
+    // All logic lives in bounty_v2_ix.rs; these are program-entry wrappers.
+
+    pub fn bv2_init_official_authority(ctx: Context<InitOfficialAuthority>, authority: Pubkey) -> Result<()> {
+        bounty_v2_ix::init_official_authority(ctx, authority)
+    }
+    pub fn bv2_rotate_official_authority(ctx: Context<RotateOfficialAuthority>, new_authority: Pubkey) -> Result<()> {
+        bounty_v2_ix::rotate_official_authority(ctx, new_authority)
+    }
+    pub fn bv2_init_bounty_counter(ctx: Context<InitBountyCounter>) -> Result<()> {
+        bounty_v2_ix::init_bounty_counter(ctx)
+    }
+    pub fn bv2_create_bounty(
+        ctx: Context<CreateBountyV2>,
+        total_reward: u64,
+        max_winners: u8,
+        deadline: i64,
+        title: String,
+        metadata_uri: String,
+        is_official: bool,
+    ) -> Result<()> {
+        bounty_v2_ix::create_bounty_v2(ctx, total_reward, max_winners, deadline, title, metadata_uri, is_official)
+    }
+    pub fn bv2_submit_to_bounty(ctx: Context<SubmitToBounty>, content_uri: String) -> Result<()> {
+        bounty_v2_ix::submit_to_bounty(ctx, content_uri)
+    }
+    pub fn bv2_award_submission(ctx: Context<AwardSubmission>, gross_amount: u64) -> Result<()> {
+        bounty_v2_ix::award_submission(ctx, gross_amount)
+    }
+    pub fn bv2_reject_submission(ctx: Context<RejectSubmission>) -> Result<()> {
+        bounty_v2_ix::reject_submission(ctx)
+    }
+    pub fn bv2_cancel_bounty(ctx: Context<CloseBountyCommon>) -> Result<()> {
+        bounty_v2_ix::cancel_bounty(ctx)
+    }
+    pub fn bv2_close_bounty(ctx: Context<CloseBountyCommon>) -> Result<()> {
+        bounty_v2_ix::close_bounty(ctx)
+    }
+    pub fn bv2_refund_expired(ctx: Context<RefundExpiredCtx>) -> Result<()> {
+        bounty_v2_ix::refund_expired(ctx)
+    }
 }
 
-// === Existing Account Structures ===
+// === Account Structures ===
+//
+// [audit fix M-C1/M-C2/M-C3] DELETED account structures: `Bounty`,
+// `License`, `AdBid`, and the old `BountyStatus` enum. These backed the
+// old escrow-less stubs that have been removed from the program.
+//
+// NOTE: `Listing` / `ListingType` are kept for now because nothing
+// downstream pulls value through them, but per audit M-H2 the listing
+// flow is decorative — the NFT is never escrowed and there is no
+// buy/settle instruction. Treat these listings as off-chain memos only.
 #[account] pub struct Listing { pub seller: Pubkey, pub nft_mint: Pubkey, pub price: u64, pub listing_type: ListingType, pub created_at: i64, pub is_active: bool, pub bump: u8 }
-#[account] pub struct Bounty { pub creator: Pubkey, pub title: String, pub description: String, pub reward_amount: u64, pub deadline: i64, pub status: BountyStatus, pub submission_count: u16, pub winner: Pubkey, pub created_at: i64, pub bump: u8 }
-#[account] pub struct License { pub licensor: Pubkey, pub licensee: Pubkey, pub royalty_bps: u16, pub granted_at: i64, pub is_active: bool, pub bump: u8 }
-#[account] pub struct AdBid { pub bidder: Pubkey, pub bid_amount: u64, pub target_slot: u8, pub is_active: bool, pub created_at: i64, pub bump: u8 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ListingType { FixedPrice, Auction, DutchAuction }
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum BountyStatus { Open, Completed, Cancelled }
 
 // === Existing Contexts ===
 #[derive(Accounts)] pub struct CreateListing<'info> {
@@ -413,37 +495,9 @@ pub mod aura_market {
     #[account(mut, has_one = seller)] pub listing: Account<'info, Listing>,
     pub seller: Signer<'info>,
 }
-#[derive(Accounts)] #[instruction(title: String)] pub struct CreateBounty<'info> {
-    #[account(init, payer = creator, space = 8+32+104+1004+8+8+1+2+32+8+1, seeds = [b"bounty", creator.key().as_ref(), title.as_bytes()], bump)]
-    pub bounty: Account<'info, Bounty>,
-    #[account(mut)] pub creator: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-#[derive(Accounts)] pub struct SubmitBountyWork<'info> { #[account(mut)] pub bounty: Account<'info, Bounty>, pub submitter: Signer<'info> }
-#[derive(Accounts)]
-pub struct AwardBounty<'info> {
-    #[account(mut, has_one = creator)]
-    pub bounty: Account<'info, Bounty>,
-    pub creator: Signer<'info>,
-    /// CHECK: Winner address only; rewards are distributed off this pubkey.
-    pub winner: AccountInfo<'info>,
-}
-#[derive(Accounts)] pub struct GrantLicense<'info> {
-    #[account(init, payer = licensor, space = 8+32+32+2+8+1+1, seeds = [b"license", licensor.key().as_ref(), licensee.key().as_ref()], bump)]
-    pub license: Account<'info, License>,
-    #[account(mut)] pub licensor: Signer<'info>,
-    /// CHECK: Licensee
-    pub licensee: AccountInfo<'info>,
-    pub system_program: Program<'info, System>,
-}
-#[derive(Accounts)]
-#[instruction(bid_amount: u64, target_slot: u8)]
-pub struct PlaceAdBid<'info> {
-    #[account(init, payer = bidder, space = 8+32+8+1+1+8+1, seeds = [b"ad_bid", bidder.key().as_ref(), &[target_slot]], bump)]
-    pub ad_bid: Account<'info, AdBid>,
-    #[account(mut)] pub bidder: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
+
+/// [audit fix M-C4] No-op context used by `assert_pools_configured`.
+#[derive(Accounts)] pub struct NoopCtx {}
 
 // === Sell Order Contexts ===
 #[derive(Accounts)] pub struct InitSellOrderCounterCtx<'info> {
@@ -463,9 +517,24 @@ pub struct PlaceSellOrderCtx<'info> {
     pub sell_order: Account<'info, SellOrder>,
     /// CHECK: Coin mint
     pub coin_mint: AccountInfo<'info>,
-    #[account(mut, constraint = seller_token_account.owner == seller.key() @ SellOrderError::Unauthorized)]
+    // [audit fix round2 R2-M-M1] Also constrain `mint == coin_mint` here so
+    // the SPL Token program's MintMismatch surface is replaced with a clean
+    // Anchor `Unauthorized` error.
+    #[account(mut,
+        constraint = seller_token_account.owner == seller.key() @ SellOrderError::Unauthorized,
+        constraint = seller_token_account.mint == coin_mint.key() @ SellOrderError::Unauthorized,
+    )]
     pub seller_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub escrow_token_account: Account<'info, TokenAccount>,
+    // [audit fix M-C5] escrow must be PDA-owned (sell_order PDA signs all
+    // future cancel/fill transfers) and denominated in the order's coin.
+    // The escrow ATA must be pre-created externally with the sell_order PDA
+    // set as `authority` and `coin_mint` set as `mint` BEFORE invoking
+    // place_sell_order, then this constraint will pass.
+    #[account(mut,
+        constraint = escrow_token_account.owner == sell_order.key() @ SellOrderError::Unauthorized,
+        constraint = escrow_token_account.mint == coin_mint.key() @ SellOrderError::Unauthorized
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
     #[account(mut)] pub seller: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -475,8 +544,24 @@ pub struct PlaceSellOrderCtx<'info> {
 pub struct CancelSellOrderCtx<'info> {
     #[account(mut, seeds = [b"sell-order", sell_order.coin_mint.as_ref(), order_id.to_le_bytes().as_ref()], bump = sell_order.bump, has_one = seller @ SellOrderError::Unauthorized)]
     pub sell_order: Account<'info, SellOrder>,
-    #[account(mut)] pub escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub seller_token_account: Account<'info, TokenAccount>,
+    // [audit fix round2 R2-M-H1] Bind escrow ownership/mint to the
+    // sell_order PDA + coin_mint, matching the constraint pattern already
+    // applied to PlaceSellOrderCtx/FillSellOrderCtx in round 1. Without
+    // this, defence-in-depth was missing on the cancel path — only the
+    // CPI signer-seed mismatch was protecting funds.
+    #[account(mut,
+        constraint = escrow_token_account.owner == sell_order.key() @ SellOrderError::Unauthorized,
+        constraint = escrow_token_account.mint == sell_order.coin_mint @ SellOrderError::Unauthorized,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+    // [audit fix round2 R2-M-H1] Bind refund destination to the seller and
+    // require mint match so a malicious wallet UI can't redirect the
+    // refund to a third party.
+    #[account(mut,
+        constraint = seller_token_account.owner == seller.key() @ SellOrderError::Unauthorized,
+        constraint = seller_token_account.mint == sell_order.coin_mint @ SellOrderError::Unauthorized,
+    )]
+    pub seller_token_account: Account<'info, TokenAccount>,
     pub seller: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -539,9 +624,23 @@ pub struct PlaceBuyOrderCtx<'info> {
     pub buy_order: Account<'info, BuyOrder>,
     /// CHECK: Coin mint
     pub coin_mint: AccountInfo<'info>,
-    #[account(mut, constraint = buyer_ora_account.owner == buyer.key() @ BuyOrderError::Unauthorized)]
+    // [audit fix round2 R2-M-M1] Constrain `mint == ORA_MINT` so the SPL
+    // Token program's MintMismatch surface is replaced with a clean Anchor
+    // `Unauthorized` error.
+    #[account(mut,
+        constraint = buyer_ora_account.owner == buyer.key() @ BuyOrderError::Unauthorized,
+        constraint = buyer_ora_account.mint == ORA_MINT @ BuyOrderError::Unauthorized,
+    )]
     pub buyer_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub escrow_ora_account: Account<'info, TokenAccount>,
+    // [audit fix M-C5b] escrow must be PDA-owned (buy_order PDA signs all
+    // future cancel/fill transfers) and denominated in ORA. Must be
+    // pre-created externally with the buy_order PDA as `authority` and the
+    // canonical ORA mint as `mint` before invoking place_buy_order.
+    #[account(mut,
+        constraint = escrow_ora_account.owner == buy_order.key() @ BuyOrderError::Unauthorized,
+        constraint = escrow_ora_account.mint == ORA_MINT @ BuyOrderError::Unauthorized
+    )]
+    pub escrow_ora_account: Account<'info, TokenAccount>,
     #[account(mut)] pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -551,8 +650,19 @@ pub struct PlaceBuyOrderCtx<'info> {
 pub struct CancelBuyOrderCtx<'info> {
     #[account(mut, seeds = [b"buy-order", buy_order.coin_mint.as_ref(), order_id.to_le_bytes().as_ref()], bump = buy_order.bump, has_one = buyer @ BuyOrderError::Unauthorized)]
     pub buy_order: Account<'info, BuyOrder>,
-    #[account(mut)] pub escrow_ora_account: Account<'info, TokenAccount>,
-    #[account(mut)] pub buyer_ora_account: Account<'info, TokenAccount>,
+    // [audit fix round2 R2-M-H1] Bind escrow ownership/mint to the
+    // buy_order PDA + ORA_MINT (symmetric to CancelSellOrderCtx).
+    #[account(mut,
+        constraint = escrow_ora_account.owner == buy_order.key() @ BuyOrderError::Unauthorized,
+        constraint = escrow_ora_account.mint == ORA_MINT @ BuyOrderError::Unauthorized,
+    )]
+    pub escrow_ora_account: Account<'info, TokenAccount>,
+    // [audit fix round2 R2-M-H1] Bind refund destination to the buyer.
+    #[account(mut,
+        constraint = buyer_ora_account.owner == buyer.key() @ BuyOrderError::Unauthorized,
+        constraint = buyer_ora_account.mint == ORA_MINT @ BuyOrderError::Unauthorized,
+    )]
+    pub buyer_ora_account: Account<'info, TokenAccount>,
     pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -605,8 +715,10 @@ pub enum ErrorCode {
     #[msg("Title too long")] TitleTooLong,
     #[msg("Description too long")] DescriptionTooLong,
     #[msg("URI too long")] UriTooLong,
-    #[msg("Bounty not open")] BountyNotOpen,
-    #[msg("Bounty expired")] BountyExpired,
     #[msg("Invalid royalty")] InvalidRoyalty,
     #[msg("Overflow")] Overflow,
+    /// [audit fix M-C4] Surfaced when placeholder protocol-pool constants
+    /// haven't been replaced with real pubkeys. Blocks revenue-bearing
+    /// instructions from running with `system_program::ID` placeholders.
+    #[msg("Protocol pool constants are placeholders — do not deploy")] PlaceholderProtocolPools,
 }

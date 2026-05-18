@@ -3,12 +3,37 @@ use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("Bhni5CRZwqPGS9PhvUQtnKFpDs1vjZ4ckYaFayfNQeqH");
 
+// =============================================================================
+// [audit fix C-L1 / C-L2] Hardcoded protocol mint + treasury addresses.
+// ⚠️ DO NOT DEPLOY — placeholders set to system_program::ID. Replace pre-mainnet
+// with real ORA mint / staking-rewards / treasury pubkeys.
+// =============================================================================
+
+/// Canonical ORA SPL mint. All tips / subs / PPV payments must use this mint.
+pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// Hardcoded staking-rewards pool (token account). 2% of tips flow here.
+pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// Hardcoded platform treasury (token account). 0.5% of tips + subscription
+/// fees + PPV fees flow here.
+pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// Hardcoded protocol oracle authorised to report off-chain stats (e.g.,
+/// `peak_viewers`). [audit fix C-L4] Without this signature `end_stream`
+/// cannot mutate viewer counts.
+pub const PEAK_VIEWERS_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
+
 /// Fee split: 5% total = 2.5% burn + 2% staking + 0.5% platform
 const BURN_BPS: u64 = 250;
 const STAKING_BPS: u64 = 200;
 const PLATFORM_BPS: u64 = 50;
 const FEE_BPS: u64 = 500;
 const LARGE_TIP_THRESHOLD: u64 = 100_000_000; // 100 ORA (6 decimals)
+
+/// [audit fix C-L3 / L-L1] Subscription pricing bounds.
+pub const MIN_SUBSCRIPTION_AMOUNT: u64 = 1_000_000;     // 1 ORA (6 decimals)
+pub const MAX_SUBSCRIPTION_AMOUNT: u64 = 1_000_000_000_000; // 1M ORA
 
 #[program]
 pub mod aura_livestream {
@@ -38,29 +63,68 @@ pub mod aura_livestream {
         Ok(())
     }
 
-    /// End a livestream, record final stats
+    /// End a livestream, record final stats.
+    /// [audit fix C-L4] `peak_viewers` is supplied by the protocol oracle
+    /// (PEAK_VIEWERS_ORACLE), NOT the creator.
+    /// [audit fix round2 R2-H-L1] No longer requires `is_live`; the oracle
+    /// can still record `peak_viewers` after a creator pre-closes the stream
+    /// via `end_stream_creator`. If the stream is still live, this call also
+    /// flips `is_live = false` to mark closure.
     pub fn end_stream(ctx: Context<EndStream>, peak_viewers: u64) -> Result<()> {
         let stream = &mut ctx.accounts.stream;
-        require!(stream.is_live, ErrorCode::StreamNotLive);
 
-        stream.is_live = false;
-        stream.end_time = Clock::get()?.unix_timestamp;
+        // [audit fix round2 R2-H-L1] If stream is still live, flip it closed
+        // and record end_time; if already closed by creator, only update peak.
+        if stream.is_live {
+            stream.is_live = false;
+            stream.end_time = Clock::get()?.unix_timestamp;
+        }
         stream.peak_viewers = peak_viewers;
 
-        msg!("Stream ended: '{}' duration={}s tips={} peak={}",
-            stream.title, stream.end_time - stream.start_time,
-            stream.total_tips, peak_viewers);
+        msg!(
+            "Stream ended/peak-set (oracle-signed): '{}' tips={} peak={}",
+            stream.title,
+            stream.total_tips,
+            peak_viewers,
+        );
+        Ok(())
+    }
+
+    /// [audit fix C-L4] Creator can close the stream without supplying
+    /// peak_viewers — leaves the field at its current (oracle-set or zero)
+    /// value. This means a creator cannot brag with a fake peak.
+    pub fn end_stream_creator(ctx: Context<EndStreamCreator>) -> Result<()> {
+        let stream = &mut ctx.accounts.stream;
+        require!(stream.is_live, ErrorCode::StreamNotLive);
+        stream.is_live = false;
+        stream.end_time = Clock::get()?.unix_timestamp;
+        msg!(
+            "Stream closed by creator: '{}' duration={}s tips={}",
+            stream.title,
+            stream.end_time - stream.start_time,
+            stream.total_tips,
+        );
         Ok(())
     }
 
     /// Fan tips a streamer with ORA. 5% fee (2.5% burn + 2% staking + 0.5% platform)
+    /// [audit fix C-L1] all token accounts + mint are constrained to canonical
+    /// protocol addresses. [audit fix M-L2] tipping requires `stream.is_live`.
     pub fn tip_streamer(ctx: Context<TipStreamer>, amount: u64, tip_nonce: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
+        // [audit fix M-L2] can only tip a live stream
+        require!(ctx.accounts.stream.is_live, ErrorCode::StreamNotLive);
 
-        let burn_amount = amount * BURN_BPS / 10000;
-        let staking_amount = amount * STAKING_BPS / 10000;
-        let platform_amount = amount * PLATFORM_BPS / 10000;
-        let creator_amount = amount - burn_amount - staking_amount - platform_amount;
+        let burn_amount = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let staking_amount = amount.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let platform_amount = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = amount
+            .checked_sub(burn_amount)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_amount)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_sub(platform_amount)
+            .ok_or(ErrorCode::Overflow)?;
 
         // Transfer to creator
         token::transfer(CpiContext::new(
@@ -104,15 +168,17 @@ pub mod aura_livestream {
 
         // Update stream stats
         let stream = &mut ctx.accounts.stream;
-        stream.total_tips = stream.total_tips.checked_add(amount).unwrap();
+        stream.total_tips = stream.total_tips.checked_add(amount).ok_or(ErrorCode::Overflow)?;
 
         // Record tip
         let tip_record = &mut ctx.accounts.tip_record;
         tip_record.fan = ctx.accounts.fan.key();
         tip_record.creator = stream.creator;
+        tip_record.stream = stream.key();
         tip_record.amount = amount;
         tip_record.timestamp = Clock::get()?.unix_timestamp;
         tip_record.is_large_tip = amount >= LARGE_TIP_THRESHOLD;
+        tip_record.tip_nonce = tip_nonce;
         tip_record.bump = ctx.bumps.tip_record;
 
         msg!("Tip: {} ORA (burn={} staking={} platform={} creator={})",
@@ -120,15 +186,40 @@ pub mod aura_livestream {
         Ok(())
     }
 
-    /// Monthly ORA subscription for ad-free + badges. 5% fee.
-    pub fn subscribe_to_creator(
-        ctx: Context<SubscribeToCreator>,
+    /// [audit fix round2 R2-H-L2] Creator sets / updates their monthly
+    /// subscription price. Fans cannot dictate the price anymore; both
+    /// `subscribe_to_creator` and `renew_subscription` read from this PDA.
+    pub fn set_subscription_price(
+        ctx: Context<SetSubscriptionPrice>,
         monthly_amount: u64,
     ) -> Result<()> {
-        require!(monthly_amount > 0, ErrorCode::InvalidAmount);
+        require!(monthly_amount >= MIN_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
+        require!(monthly_amount <= MAX_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
+        let cfg = &mut ctx.accounts.subscription_config;
+        cfg.creator = ctx.accounts.creator.key();
+        cfg.monthly_amount = monthly_amount;
+        cfg.is_set = true;
+        cfg.bump = ctx.bumps.subscription_config;
+        msg!("Subscription price set for {}: {} ORA/month", cfg.creator, monthly_amount);
+        Ok(())
+    }
 
-        let fee = monthly_amount * FEE_BPS / 10000;
-        let creator_amount = monthly_amount - fee;
+    /// Monthly ORA subscription for ad-free + badges. 5% fee.
+    /// [audit fix C-L2] same constraint pattern as tip_streamer.
+    /// [audit fix round2 R2-H-L2] `monthly_amount` is no longer fan-supplied;
+    /// it is read from the creator's `CreatorSubscriptionConfig` PDA. The
+    /// creator must have called `set_subscription_price` first.
+    pub fn subscribe_to_creator(
+        ctx: Context<SubscribeToCreator>,
+    ) -> Result<()> {
+        // [audit fix round2 R2-H-L2] price is sourced from creator's config.
+        require!(ctx.accounts.subscription_config.is_set, ErrorCode::SubscriptionPriceNotSet);
+        let monthly_amount = ctx.accounts.subscription_config.monthly_amount;
+        require!(monthly_amount >= MIN_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
+        require!(monthly_amount <= MAX_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
+
+        let fee = monthly_amount.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = monthly_amount.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
 
         // Transfer to creator
         token::transfer(CpiContext::new(
@@ -156,7 +247,7 @@ pub mod aura_livestream {
         sub.creator = ctx.accounts.creator.key();
         sub.monthly_amount = monthly_amount;
         sub.started_at = now;
-        sub.expires_at = now + 30 * 86400;
+        sub.expires_at = now.checked_add(30 * 86400).ok_or(ErrorCode::Overflow)?;
         sub.is_active = true;
         sub.bump = ctx.bumps.subscription;
 
@@ -164,11 +255,29 @@ pub mod aura_livestream {
         Ok(())
     }
 
-    pub fn renew_subscription(ctx: Context<RenewSubscription>, monthly_amount: u64) -> Result<()> {
-        require!(monthly_amount > 0, ErrorCode::InvalidAmount);
+    /// Renew an existing subscription.
+    /// [audit fix C-L3] monthly_amount is read from the stored subscription —
+    /// the fan cannot pass a tiny amount to "cheap-renew". Also adds an
+    /// explicit `is_active` check (no renewing an expired/cancelled sub).
+    /// [audit fix round2 R2-H-L2] If the creator has raised the price via
+    /// `set_subscription_price`, renewal charges the CURRENT creator price.
+    pub fn renew_subscription(ctx: Context<RenewSubscription>) -> Result<()> {
+        // [audit fix round2 R2-H-L2] use creator's current config price; the
+        // stored sub price is only a historical record.
+        require!(ctx.accounts.subscription_config.is_set, ErrorCode::SubscriptionPriceNotSet);
+        let monthly_amount = ctx.accounts.subscription_config.monthly_amount;
+        // [audit fix C-L3] (originally) rejected renewal of inactive subs.
+        // [audit fix R3-M-L2] Removed the `is_active` gate. Combined with
+        // R2-M-L1's `cancel_subscription`, the old check made cancel a one-way
+        // door: the `subscription` PDA is `init` per (creator, fan), so a fan
+        // who ever cancelled could never re-subscribe to that creator. Renew
+        // is now also the path used to *re-activate* an inactive subscription;
+        // `is_active` is explicitly set to true at the end of this function.
+        require!(monthly_amount >= MIN_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
+        require!(monthly_amount <= MAX_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
 
-        let fee = monthly_amount * FEE_BPS / 10000;
-        let creator_amount = monthly_amount - fee;
+        let fee = monthly_amount.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = monthly_amount.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
 
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -190,13 +299,29 @@ pub mod aura_livestream {
 
         let sub = &mut ctx.accounts.subscription;
         let now = Clock::get()?.unix_timestamp;
-        sub.monthly_amount = monthly_amount;
         // Extend from current expiry if still active, else from now
         let base_time = if sub.expires_at > now { sub.expires_at } else { now };
-        sub.expires_at = base_time + 30 * 86400;
+        sub.expires_at = base_time.checked_add(30 * 86400).ok_or(ErrorCode::Overflow)?;
         sub.is_active = true;
+        // [audit fix round2 R2-H-L2] keep historical sub amount in sync with
+        // creator-controlled price at renewal time.
+        sub.monthly_amount = monthly_amount;
 
-        msg!("Subscription renewed until {}", sub.expires_at);
+        msg!("Subscription renewed until {} amount={}", sub.expires_at, monthly_amount);
+        Ok(())
+    }
+
+    /// [audit fix R2-M-L1] Cancel an active subscription. The fan signs and
+    /// flips `is_active = false`; expiration is left unchanged so the fan
+    /// retains paid-for benefits until `expires_at`. Without this path,
+    /// `is_active` was a dead field (always `true` after subscribe / renew).
+    pub fn cancel_subscription(ctx: Context<CancelSubscription>) -> Result<()> {
+        let sub = &mut ctx.accounts.subscription;
+        require!(sub.is_active, ErrorCode::SubscriptionInactive);
+        sub.is_active = false;
+        msg!("Subscription cancelled: fan={} creator={}", sub.fan, sub.creator);
+        Ok(())
+    }
 
     /// Creator sets up a pay-per-view event
     pub fn create_pay_per_view(
@@ -223,6 +348,18 @@ pub mod aura_livestream {
         Ok(())
     }
 
+    /// [audit fix R2-L-L1] Creator closes a PPV event. Prevents new
+    /// `purchase_ppv` calls while leaving existing access records intact.
+    /// Without this path, `ppv_event.is_active` was a dead field (always
+    /// `true` after create).
+    pub fn close_ppv_event(ctx: Context<ClosePpvEvent>) -> Result<()> {
+        let ppv = &mut ctx.accounts.ppv_event;
+        require!(ppv.is_active, ErrorCode::EventNotActive);
+        ppv.is_active = false;
+        msg!("PPV event closed: id={}", ppv.ppv_id);
+        Ok(())
+    }
+
     /// Fan purchases access to a PPV stream. 5% fee.
     pub fn purchase_ppv(ctx: Context<PurchasePPV>) -> Result<()> {
         let ppv = &ctx.accounts.ppv_event;
@@ -230,8 +367,8 @@ pub mod aura_livestream {
 
         let price = ppv.price;
         let ppv_id = ppv.ppv_id;
-        let fee = price * FEE_BPS / 10000;
-        let creator_amount = price - fee;
+        let fee = price.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = price.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
 
         // Transfer to creator
         token::transfer(CpiContext::new(
@@ -263,14 +400,17 @@ pub mod aura_livestream {
 
         // Update PPV stats
         let ppv = &mut ctx.accounts.ppv_event;
-        ppv.total_purchases += 1;
-        ppv.total_revenue = ppv.total_revenue.checked_add(price).unwrap();
+        ppv.total_purchases = ppv.total_purchases.checked_add(1).ok_or(ErrorCode::Overflow)?;
+        ppv.total_revenue = ppv.total_revenue.checked_add(price).ok_or(ErrorCode::Overflow)?;
 
         msg!("PPV purchased: fan={} event={}", access.fan, ppv_id);
         Ok(())
     }
 
-    /// Large tips (>100 ORA) trigger bonus Creator Coin interaction
+    /// Large tips (>100 ORA) trigger bonus Creator Coin interaction.
+    /// [audit fix H-L1 / I-L1] caller MUST be the original tipping fan
+    /// (verified via `tip_record.fan == fan.key()`), preventing third-party
+    /// grief-creation of boost PDAs.
     pub fn creator_coin_tip_boost(ctx: Context<CreatorCoinTipBoost>) -> Result<()> {
         let tip = &ctx.accounts.tip_record;
         require!(tip.is_large_tip, ErrorCode::TipNotLargeEnough);
@@ -316,9 +456,11 @@ pub struct LiveStream {
 pub struct TipRecord {
     pub fan: Pubkey,
     pub creator: Pubkey,
+    pub stream: Pubkey,   // [audit fix H-L1] explicit stream binding
     pub amount: u64,
     pub timestamp: i64,
     pub is_large_tip: bool,
+    pub tip_nonce: u64,
     pub bump: u8,
 }
 
@@ -354,6 +496,16 @@ pub struct PPVAccess {
     pub bump: u8,
 }
 
+/// [audit fix round2 R2-H-L2] Creator-controlled subscription price. Each
+/// creator owns one PDA seeded by their pubkey; only the creator can update.
+#[account]
+pub struct CreatorSubscriptionConfig {
+    pub creator: Pubkey,
+    pub monthly_amount: u64,
+    pub is_set: bool,
+    pub bump: u8,
+}
+
 #[account]
 pub struct TipBoost {
     pub fan: Pubkey,
@@ -381,8 +533,21 @@ pub struct StartStream<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// [audit fix C-L4] EndStream now requires the protocol oracle signature.
 #[derive(Accounts)]
 pub struct EndStream<'info> {
+    #[account(mut,
+        seeds = [b"stream", stream.creator.as_ref(), stream.stream_id.to_le_bytes().as_ref()],
+        bump = stream.bump
+    )]
+    pub stream: Account<'info, LiveStream>,
+    /// [audit fix C-L4] only the hardcoded oracle can set peak_viewers.
+    #[account(address = PEAK_VIEWERS_ORACLE @ ErrorCode::Unauthorized)]
+    pub oracle: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct EndStreamCreator<'info> {
     #[account(mut, has_one = creator,
         seeds = [b"stream", creator.key().as_ref(), stream.stream_id.to_le_bytes().as_ref()],
         bump = stream.bump
@@ -402,21 +567,38 @@ pub struct TipStreamer<'info> {
 
     #[account(
         init, payer = fan,
-        space = 8 + 32 + 32 + 8 + 8 + 1 + 1,
+        space = 8 + 32 + 32 + 32 + 8 + 8 + 1 + 8 + 1,
         seeds = [b"tip", stream.key().as_ref(), fan.key().as_ref(), tip_nonce.to_le_bytes().as_ref()],
         bump
     )]
     pub tip_record: Account<'info, TipRecord>,
 
-    #[account(mut)]
+    /// [audit fix C-L1] fan_token must be ORA-denominated, owned by the fan.
+    #[account(mut,
+        constraint = fan_token_account.owner == fan.key() @ ErrorCode::Unauthorized,
+        constraint = fan_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub fan_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L1] creator_token must be ORA-denominated and OWNED by the
+    /// stream's creator — the fan can't "refund themselves" by passing their
+    /// own ATA.
+    #[account(mut,
+        constraint = creator_token_account.owner == stream.creator @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L1] hardcoded protocol staking-rewards pool.
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
     pub staking_pool: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L1] hardcoded protocol platform treasury.
+    #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L1] only the canonical ORA mint can be burned.
+    #[account(mut, address = ORA_MINT @ ErrorCode::Unauthorized)]
     pub ora_mint: Account<'info, Mint>,
 
     #[account(mut)]
@@ -435,14 +617,33 @@ pub struct SubscribeToCreator<'info> {
     )]
     pub subscription: Account<'info, Subscription>,
 
-    #[account(mut)]
+    /// [audit fix round2 R2-H-L2] Creator-controlled price PDA.
+    #[account(
+        seeds = [b"sub_config", creator.key().as_ref()],
+        bump = subscription_config.bump,
+        constraint = subscription_config.creator == creator.key() @ ErrorCode::Unauthorized,
+    )]
+    pub subscription_config: Account<'info, CreatorSubscriptionConfig>,
+
+    /// [audit fix C-L2] ORA-denominated, fan-owned.
+    #[account(mut,
+        constraint = fan_token_account.owner == fan.key() @ ErrorCode::Unauthorized,
+        constraint = fan_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub fan_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L2] ORA, owned by the creator key passed in.
+    #[account(mut,
+        constraint = creator_token_account.owner == creator.key() @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    /// [audit fix C-L2] hardcoded platform treasury.
+    #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
 
-    /// CHECK: Creator pubkey
+    /// CHECK: creator pubkey — used as a seed AND to bind the creator_token_account.
     pub creator: UncheckedAccount<'info>,
     #[account(mut)]
     pub fan: Signer<'info>,
@@ -450,6 +651,38 @@ pub struct SubscribeToCreator<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// [audit fix round2 R2-H-L2] Creator opens / updates their subscription
+/// pricing. `init_if_needed` lets the same handler do both create and update.
+#[derive(Accounts)]
+pub struct SetSubscriptionPrice<'info> {
+    #[account(
+        init_if_needed,
+        payer = creator,
+        space = 8 + 32 + 8 + 1 + 1,
+        seeds = [b"sub_config", creator.key().as_ref()],
+        bump,
+    )]
+    pub subscription_config: Account<'info, CreatorSubscriptionConfig>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+
+/// [audit fix R2-M-L1] Fan cancels their own subscription. PDA seeds bind
+/// the subscription to the (creator, fan) pair so a third party cannot
+/// cancel someone else's sub.
+#[derive(Accounts)]
+pub struct CancelSubscription<'info> {
+    #[account(
+        mut,
+        seeds = [b"subscription", subscription.creator.as_ref(), fan.key().as_ref()],
+        bump = subscription.bump,
+        constraint = subscription.fan == fan.key() @ ErrorCode::Unauthorized,
+    )]
+    pub subscription: Account<'info, Subscription>,
+    pub fan: Signer<'info>,
+}
 
 #[derive(Accounts)]
 pub struct RenewSubscription<'info> {
@@ -457,18 +690,35 @@ pub struct RenewSubscription<'info> {
         mut,
         seeds = [b"subscription", creator.key().as_ref(), fan.key().as_ref()],
         bump = subscription.bump,
-        constraint = subscription.fan == fan.key() @ ErrorCode::InvalidAmount
+        constraint = subscription.fan == fan.key() @ ErrorCode::Unauthorized,
+        constraint = subscription.creator == creator.key() @ ErrorCode::Unauthorized,
     )]
     pub subscription: Account<'info, Subscription>,
 
-    #[account(mut)]
+    /// [audit fix round2 R2-H-L2] Creator-controlled price PDA for renewal.
+    #[account(
+        seeds = [b"sub_config", creator.key().as_ref()],
+        bump = subscription_config.bump,
+        constraint = subscription_config.creator == creator.key() @ ErrorCode::Unauthorized,
+    )]
+    pub subscription_config: Account<'info, CreatorSubscriptionConfig>,
+
+    #[account(mut,
+        constraint = fan_token_account.owner == fan.key() @ ErrorCode::Unauthorized,
+        constraint = fan_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub fan_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    #[account(mut,
+        constraint = creator_token_account.owner == creator.key() @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
 
-    /// CHECK: Creator pubkey
+    /// CHECK: creator pubkey (matches subscription.creator + token-account owner).
     pub creator: UncheckedAccount<'info>,
     #[account(mut)]
     pub fan: Signer<'info>,
@@ -490,6 +740,19 @@ pub struct CreatePayPerView<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// [audit fix R2-L-L1] Creator-only close path for a PPV event.
+#[derive(Accounts)]
+pub struct ClosePpvEvent<'info> {
+    #[account(
+        mut,
+        has_one = creator @ ErrorCode::Unauthorized,
+        seeds = [b"ppv", creator.key().as_ref(), ppv_event.ppv_id.to_le_bytes().as_ref()],
+        bump = ppv_event.bump,
+    )]
+    pub ppv_event: Account<'info, PPVEvent>,
+    pub creator: Signer<'info>,
+}
+
 #[derive(Accounts)]
 pub struct PurchasePPV<'info> {
     #[account(mut,
@@ -506,11 +769,19 @@ pub struct PurchasePPV<'info> {
     )]
     pub ppv_access: Account<'info, PPVAccess>,
 
-    #[account(mut)]
+    #[account(mut,
+        constraint = fan_token_account.owner == fan.key() @ ErrorCode::Unauthorized,
+        constraint = fan_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub fan_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    #[account(mut,
+        constraint = creator_token_account.owner == ppv_event.creator @ ErrorCode::Unauthorized,
+        constraint = creator_token_account.mint == ORA_MINT @ ErrorCode::Unauthorized,
+    )]
     pub creator_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+
+    #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
 
     #[account(mut)]
@@ -523,10 +794,14 @@ pub struct PurchasePPV<'info> {
 
 #[derive(Accounts)]
 pub struct CreatorCoinTipBoost<'info> {
+    /// [audit fix H-L1] tip_record must reference the calling `fan`.
+    #[account(
+        constraint = tip_record.fan == fan.key() @ ErrorCode::Unauthorized,
+    )]
     pub tip_record: Account<'info, TipRecord>,
 
     #[account(
-        init, payer = authority,
+        init, payer = fan,
         space = 8 + 32 + 32 + 8 + 2 + 8 + 1,
         seeds = [b"tip_boost", tip_record.key().as_ref()],
         bump
@@ -534,7 +809,7 @@ pub struct CreatorCoinTipBoost<'info> {
     pub tip_boost: Account<'info, TipBoost>,
 
     #[account(mut)]
-    pub authority: Signer<'info>,
+    pub fan: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -550,4 +825,12 @@ pub enum ErrorCode {
     EventNotActive,
     #[msg("Tip not large enough for boost (minimum 100 ORA)")]
     TipNotLargeEnough,
+    #[msg("Unauthorized")]
+    Unauthorized,
+    #[msg("Overflow")]
+    Overflow,
+    #[msg("Subscription is not active")]
+    SubscriptionInactive,
+    #[msg("Subscription price has not been set by the creator")]
+    SubscriptionPriceNotSet,
 }

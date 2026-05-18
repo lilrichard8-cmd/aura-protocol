@@ -1,4 +1,4 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, SystemProgram } from '@solana/web3.js';
 import { WalletAdapter } from '@solana/wallet-adapter-base';
 import { AuraClientConfig } from './types';
 import { PROGRAM_IDS, RPC_ENDPOINTS } from './constants';
@@ -7,6 +7,17 @@ import { SocialModule } from './modules/social';
 import { CreatorCoinModule } from './modules/creatorCoin';
 import { CurationModule } from './modules/curation';
 import { ReputationModule } from './modules/reputation';
+import { MarketModule, MarketModuleConfig } from './modules/market';
+import { CoreModule } from './modules/core';
+import { OraModule } from './modules/ora';
+import { VaultModule } from './modules/vault';
+import { StakingModule } from './modules/staking';
+import { RewardsModule } from './modules/rewards';
+import { LivestreamModule } from './modules/livestream';
+import { ContentLicenseModule } from './modules/contentLicense';
+import { SocialGraphModule } from './modules/socialGraph';
+import { GovernanceModule } from './modules/governance';
+import { FractionalizeModule } from './modules/fractionalize';
 
 /**
  * Main AURA Protocol SDK Client
@@ -53,6 +64,13 @@ export class AuraClient {
   private readonly governanceProgramId: PublicKey;
   private readonly marketProgramId: PublicKey;
   private readonly vaultProgramId: PublicKey;
+  private readonly oraProgramId: PublicKey;
+  private readonly stakingProgramId: PublicKey;
+  private readonly rewardsProgramId: PublicKey;
+  private readonly livestreamProgramId: PublicKey;
+  private readonly contentLicenseProgramId: PublicKey;
+  private readonly socialGraphProgramId: PublicKey;
+  private readonly fractionalizeProgramId: PublicKey;
 
   // Modules
   public readonly content: ContentModule;
@@ -60,6 +78,17 @@ export class AuraClient {
   public readonly creatorCoin: CreatorCoinModule;
   public readonly curation: CurationModule;
   public readonly reputation: ReputationModule;
+  public readonly market: MarketModule;
+  public readonly core: CoreModule;
+  public readonly ora: OraModule;
+  public readonly vault: VaultModule;
+  public readonly staking: StakingModule;
+  public readonly rewards: RewardsModule;
+  public readonly livestream: LivestreamModule;
+  public readonly contentLicense: ContentLicenseModule;
+  public readonly socialGraph: SocialGraphModule;
+  public readonly governance: GovernanceModule;
+  public readonly fractionalize: FractionalizeModule;
 
   /**
    * Create a new AURA Protocol SDK client
@@ -80,6 +109,21 @@ export class AuraClient {
     this.governanceProgramId = programIds.governance;
     this.marketProgramId = programIds.market;
     this.vaultProgramId = programIds.vault;
+    // ORA program id only ships in DEVNET/LOCALNET maps for now; fall back
+    // to the system program for networks where it isn't deployed yet.
+    // The newer per-program ids only exist on DEVNET/LOCALNET. Fall back to
+    // the system program on networks where they aren't deployed.
+    const optProgramId = (key: string): PublicKey =>
+      (key in programIds && (programIds as any)[key])
+        ? ((programIds as any)[key] as PublicKey)
+        : SystemProgram.programId;
+    this.oraProgramId = optProgramId('ora');
+    this.stakingProgramId = optProgramId('staking');
+    this.rewardsProgramId = optProgramId('rewards');
+    this.livestreamProgramId = optProgramId('livestream');
+    this.contentLicenseProgramId = optProgramId('contentLicense');
+    this.socialGraphProgramId = optProgramId('socialGraph');
+    this.fractionalizeProgramId = optProgramId('fractionalize');
 
     // Initialize modules
     this.content = new ContentModule(
@@ -111,6 +155,86 @@ export class AuraClient {
       this.wallet,
       this.coreProgramId
     );
+
+    // Market module needs hardcoded protocol pool addresses to match the
+    // on-chain constants. Caller-supplied via config.marketConfig; otherwise
+    // we fall back to system-program placeholders, which mirrors what the
+    // contract currently has and lets the SDK type-check on devnet/localnet.
+    const placeholderPool = SystemProgram.programId;
+    const placeholderMint = SystemProgram.programId;
+    const marketCfg: MarketModuleConfig = config.marketConfig ?? {
+      stakingRewardsPool: placeholderPool,
+      gasReservePool: placeholderPool,
+      opsTreasuryPool: placeholderPool,
+      oraMint: placeholderMint,
+    };
+    this.market = new MarketModule(
+      this.connection,
+      this.wallet,
+      this.marketProgramId,
+      marketCfg
+    );
+
+    // New real-chain modules (Anchor-compatible discriminators).
+    this.core = new CoreModule(
+      this.connection,
+      this.wallet,
+      this.coreProgramId
+    );
+
+    this.ora = new OraModule(
+      this.connection,
+      this.wallet,
+      this.oraProgramId
+    );
+
+    this.vault = new VaultModule(
+      this.connection,
+      this.wallet,
+      this.vaultProgramId
+    );
+
+    this.staking = new StakingModule(
+      this.connection,
+      this.wallet,
+      this.stakingProgramId
+    );
+
+    this.rewards = new RewardsModule(
+      this.connection,
+      this.wallet,
+      this.rewardsProgramId
+    );
+
+    this.livestream = new LivestreamModule(
+      this.connection,
+      this.wallet,
+      this.livestreamProgramId
+    );
+
+    this.contentLicense = new ContentLicenseModule(
+      this.connection,
+      this.wallet,
+      this.contentLicenseProgramId
+    );
+
+    this.socialGraph = new SocialGraphModule(
+      this.connection,
+      this.wallet,
+      this.socialGraphProgramId
+    );
+
+    this.governance = new GovernanceModule(
+      this.connection,
+      this.wallet,
+      this.governanceProgramId
+    );
+
+    this.fractionalize = new FractionalizeModule(
+      this.connection,
+      this.wallet,
+      this.fractionalizeProgramId
+    );
   }
 
   /**
@@ -138,6 +262,13 @@ export class AuraClient {
       governance: this.governanceProgramId,
       market: this.marketProgramId,
       vault: this.vaultProgramId,
+      ora: this.oraProgramId,
+      staking: this.stakingProgramId,
+      rewards: this.rewardsProgramId,
+      livestream: this.livestreamProgramId,
+      contentLicense: this.contentLicenseProgramId,
+      socialGraph: this.socialGraphProgramId,
+      fractionalize: this.fractionalizeProgramId,
     };
   }
 

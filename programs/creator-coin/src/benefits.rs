@@ -94,4 +94,7 @@ pub enum BenefitsError {
     Unauthorized,
     #[msg("Arithmetic overflow")]
     Overflow,
+    // [audit fix B.M-3]
+    #[msg("Benefit threshold is immutable after creation")]
+    ThresholdImmutable,
 }
