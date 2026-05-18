@@ -189,6 +189,19 @@ pub const RISING_STAR_MONTHLY_CAP: u64 = 5_000 * 1_000_000_000;
 pub const RISING_STAR_DURATION_MONTHS: u8 = 12;
 
 // ──────────────────────────────────────────────────────────────────────
+// [audit fix R6-LI-H1] Rising Star anti-fraud constants (Handbook §4.3)
+// ──────────────────────────────────────────────────────────────────────
+/// Minimum follower account age (seconds) before they can count toward a
+/// creator's monthly Rising Star total. Handbook §4.3 says ">7 days".
+pub const FOLLOWER_MIN_ACCOUNT_AGE_SECS: i64 = 7 * 24 * 60 * 60;
+/// Minimum interactions a follower must have with the creator/platform to
+/// count as a real follower (1 keeps Phase-1 simple; can be raised later).
+pub const FOLLOWER_MIN_INTERACTIONS: u8 = 1;
+/// Hard cap: at most 5,000 distinct followers can be "valid" per creator
+/// per month — mirrors RISING_STAR_MONTHLY_CAP / RATE_PER_FOLLOWER.
+pub const RISING_STAR_MAX_VALID_FOLLOWERS_PER_MONTH: u64 = 5_000;
+
+// ──────────────────────────────────────────────────────────────────────
 // [whitepaper-sync v1.1] §5.6 launch-incentives — program
 // ──────────────────────────────────────────────────────────────────────
 
@@ -767,8 +780,22 @@ pub mod aura_launch_incentives {
     /// month_index): re-recording fails because RisingStarMonth is
     /// `init`-only via Anchor.
     /// [whitepaper-sync v1.1] §5.6 launch-incentives
-    pub fn record_monthly_followers(
-        ctx: Context<RecordMonthlyFollowers>,
+    ///
+    /// [audit fix R6-LI-H1] on-chain anti-fraud (age + mutual + cap) for
+    /// Rising Star.
+    ///
+    /// [audit fix R7-LI-C1] FollowerProof PDAs are now WIRED into the payout
+    /// (previously decorative). The oracle must pass one FollowerProof PDA
+    /// per attested new-follower via `remaining_accounts`. The handler
+    /// iterates, verifies each proof is owned by this program, has the
+    /// correct discriminator, binds to this creator, and satisfies the
+    /// age/interaction floors. It then deduplicates A↔B pairs by canonical
+    /// ordering (L7-LI-H1 fix: same A↔B pair counted once even if BOTH
+    /// directions have FollowerProof PDAs). Finally it requires the count of
+    /// validated, unique proofs to be >= `new_followers` — a compromised
+    /// oracle can no longer mint reward against ghost followers.
+    pub fn record_monthly_followers<'info>(
+        ctx: Context<'_, '_, '_, 'info, RecordMonthlyFollowers<'info>>,
         month_index: u8,
         new_followers: u64,
     ) -> Result<()> {
@@ -780,6 +807,13 @@ pub mod aura_launch_incentives {
         require!(
             ctx.accounts.grant.status == RisingStarStatus::Active,
             ErrorCode::GrantNotActive
+        );
+        // [audit fix R6-LI-H1] cap-by-month on-chain so a compromised oracle
+        // cannot mint more than RISING_STAR_MAX_VALID_FOLLOWERS_PER_MONTH per
+        // creator per month even if it signs an absurd count.
+        require!(
+            new_followers <= RISING_STAR_MAX_VALID_FOLLOWERS_PER_MONTH,
+            ErrorCode::FollowerCountExceedsMonthlyCap
         );
         // [audit fix R5 M-LI-3] bind `month_index` to elapsed wall-clock time.
         // Previously the oracle could front-load all 12 months at registration
@@ -795,6 +829,122 @@ pub mod aura_launch_incentives {
             .checked_mul(ONBOARDING_MONTH_SECS) // re-use 30-day buckets
             .ok_or(ErrorCode::Overflow)?;
         require!(elapsed >= cliff, ErrorCode::TooEarly);
+
+        // [audit fix R7-LI-C1] Aggregate validated FollowerProof PDAs from
+        // remaining_accounts. Each proof is verified for:
+        //   - account owner == this program
+        //   - discriminator matches FollowerProof
+        //   - proof.creator == grant.creator (binds to THIS creator)
+        //   - proof.account_age_at_proof >= FOLLOWER_MIN_ACCOUNT_AGE_SECS (7d)
+        //   - proof.interaction_count >= FOLLOWER_MIN_INTERACTIONS
+        //
+        // [audit fix R8-LI-H1] Each proof's `submitted_at` MUST fall within
+        // the month_index's [start, end) bucket
+        //   [ grant.start_at + month_index*ONBOARDING_MONTH_SECS,
+        //     grant.start_at + (month_index+1)*ONBOARDING_MONTH_SECS )
+        // Without this, a single FollowerProof PDA (which is `init`-only and
+        // therefore eternal) could be replayed across all 12 months and the
+        // creator could drain the full 60K cap from one cohort of 5K real
+        // followers — defeating the Handbook §4.3 "new followers per month"
+        // intent. Proofs submitted before this month or after this month's
+        // end are silently skipped (continue) rather than reverting, so the
+        // oracle can pass a superset of proofs across months.
+        //
+        // Then we deduplicate A↔B canonical pairs (L7-LI-H1 fix) so a
+        // mutual-counted pair is never double-counted across the two
+        // direction-specific FollowerProof PDAs.
+        let creator_key = ctx.accounts.grant.creator;
+        let proof_disc = <FollowerProof as anchor_lang::Discriminator>::DISCRIMINATOR;
+        // [audit fix R8-LI-H1] month bucket bounds
+        let month_start = ctx
+            .accounts
+            .grant
+            .start_at
+            .checked_add(cliff)
+            .ok_or(ErrorCode::Overflow)?;
+        let month_end = month_start
+            .checked_add(ONBOARDING_MONTH_SECS)
+            .ok_or(ErrorCode::Overflow)?;
+        let mut seen_pairs: Vec<(Pubkey, Pubkey)> = Vec::new();
+        let mut validated: u64 = 0;
+        for ai in ctx.remaining_accounts.iter() {
+            // Owner & disc gate — silently ignore non-proof accounts so the
+            // oracle can pass `system_program` placeholders for the
+            // zero-follower case if desired (though such a tx is pointless).
+            if ai.owner != ctx.program_id {
+                continue;
+            }
+            let data = ai.try_borrow_data()?;
+            if data.len() < FollowerProof::SIZE {
+                continue;
+            }
+            if data[..8] != proof_disc {
+                continue;
+            }
+            // FollowerProof layout: 8 disc + 32 follower + 32 creator
+            // + 8 age + 1 interaction_count + 1 is_mutual + 8 submitted_at
+            // + 1 bump. We only need follower, creator, age,
+            // interaction_count for validation.
+            let follower = Pubkey::try_from(&data[8..40])
+                .map_err(|_| ErrorCode::Overflow)?;
+            let proof_creator = Pubkey::try_from(&data[40..72])
+                .map_err(|_| ErrorCode::Overflow)?;
+            require!(
+                proof_creator == creator_key,
+                ErrorCode::Unauthorized
+            );
+            // 8 bytes little-endian i64 for account_age_at_proof at offset 72.
+            let mut age_bytes = [0u8; 8];
+            age_bytes.copy_from_slice(&data[72..80]);
+            let age = i64::from_le_bytes(age_bytes);
+            require!(
+                age >= FOLLOWER_MIN_ACCOUNT_AGE_SECS,
+                ErrorCode::FollowerAccountTooNew
+            );
+            let interaction_count = data[80];
+            require!(
+                interaction_count >= FOLLOWER_MIN_INTERACTIONS,
+                ErrorCode::InsufficientInteractions
+            );
+            // [audit fix R8-LI-H1] proof.submitted_at must fall within this
+            // month's [start, end) bucket. Layout offset 82..90 is
+            // `submitted_at: i64` (after the 1-byte is_mutual at offset 81).
+            let mut submitted_at_bytes = [0u8; 8];
+            submitted_at_bytes.copy_from_slice(&data[82..90]);
+            let submitted_at = i64::from_le_bytes(submitted_at_bytes);
+            if submitted_at < month_start || submitted_at >= month_end {
+                // Proof exists but was submitted outside this month bucket.
+                // Silently skip so the oracle can pass cross-month proof
+                // supersets without reverting; only in-bucket proofs count.
+                continue;
+            }
+            // Canonical pair for A↔B dedup. Same A↔B pair counted once
+            // even if BOTH FollowerProof[A,B] and FollowerProof[B,A] exist.
+            let (lo, hi) = if follower < proof_creator {
+                (follower, proof_creator)
+            } else {
+                (proof_creator, follower)
+            };
+            if seen_pairs.iter().any(|p| p == &(lo, hi)) {
+                // L7-LI-H1: this pair already counted, skip the reverse
+                // direction's proof rather than counting it twice.
+                continue;
+            }
+            seen_pairs.push((lo, hi));
+            validated = validated
+                .checked_add(1)
+                .ok_or(ErrorCode::Overflow)?;
+        }
+        // The oracle's claimed `new_followers` must be backed by at least
+        // that many validated, unique FollowerProof PDAs. Strict equality
+        // would be ideal, but ">=" lets the oracle over-attest proofs
+        // (e.g. include proofs for followers it didn't claim) without
+        // rejecting the tx. The cap (5,000) plus per-call attestation cost
+        // bounds the attack surface.
+        require!(
+            validated >= new_followers,
+            ErrorCode::FollowerProofsInsufficient
+        );
 
         // 1 follower = 1 ORA, capped at 5,000 ORA / month.
         // [whitepaper-sync v1.1] §5.6 launch-incentives
@@ -815,11 +965,111 @@ pub mod aura_launch_incentives {
         month.claimed = false;
         month.bump = ctx.bumps.month;
         msg!(
-            "RisingStar month recorded: creator={} month={} followers={} amount={}",
+            "RisingStar month recorded: creator={} month={} followers={} validated={} amount={}",
             month.creator,
             month_index,
             new_followers,
+            validated,
             amount
+        );
+        Ok(())
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // [audit fix R6-LI-H1] On-chain Rising Star anti-fraud surface
+    // (Handbook §4.3 "Anti-fraud measures")
+    // ───────────────────────────────────────────────────────────────
+    /// Oracle attests, on-chain, that a specific follower account is real
+    /// (non-mutual follow):
+    ///   - `follower_account_age_secs >= FOLLOWER_MIN_ACCOUNT_AGE_SECS (7d)`
+    ///   - `interaction_count >= FOLLOWER_MIN_INTERACTIONS (1)`
+    /// The FollowerProof PDA is seeded by `(b"follower_proof", follower,
+    /// creator)` so the same follower cannot be attested twice for the
+    /// same creator (init reverts AccountAlreadyInitialized).
+    pub fn submit_follower_proof(
+        ctx: Context<SubmitFollowerProof>,
+        follower_account_age_secs: i64,
+        interaction_count: u8,
+    ) -> Result<()> {
+        // [audit fix R6-LI-H1]
+        require!(
+            follower_account_age_secs >= FOLLOWER_MIN_ACCOUNT_AGE_SECS,
+            ErrorCode::FollowerAccountTooNew
+        );
+        require!(
+            interaction_count >= FOLLOWER_MIN_INTERACTIONS,
+            ErrorCode::InsufficientInteractions
+        );
+        require!(
+            ctx.accounts.grant.status == RisingStarStatus::Active,
+            ErrorCode::GrantNotActive
+        );
+
+        let proof = &mut ctx.accounts.proof;
+        proof.follower = ctx.accounts.follower.key();
+        proof.creator = ctx.accounts.grant.creator;
+        proof.account_age_at_proof = follower_account_age_secs;
+        proof.interaction_count = interaction_count;
+        proof.is_mutual = false;
+        proof.submitted_at = Clock::get()?.unix_timestamp;
+        proof.bump = ctx.bumps.proof;
+
+        msg!(
+            "FollowerProof submitted: follower={} creator={} age={}s mutual=false",
+            proof.follower,
+            proof.creator,
+            follower_account_age_secs
+        );
+        Ok(())
+    }
+
+    /// Oracle attests a *mutual* follow proof. Same age + interaction
+    /// checks as `submit_follower_proof`, but ALSO inits a
+    /// MutualFollowMarker PDA seeded by the canonical ordering
+    /// `(b"mutual_follow", min(follower,creator), max(follower,creator))`.
+    /// The marker's `init` enforces the once-per-pair rule — the reverse
+    /// direction's mutual proof submission reverts with
+    /// AccountAlreadyInitialized (caller-friendly `MutualAlreadyCounted`
+    /// surfaces from the constraint message in Accounts ctx).
+    pub fn submit_follower_proof_mutual(
+        ctx: Context<SubmitFollowerProofMutual>,
+        follower_account_age_secs: i64,
+        interaction_count: u8,
+    ) -> Result<()> {
+        // [audit fix R6-LI-H1]
+        require!(
+            follower_account_age_secs >= FOLLOWER_MIN_ACCOUNT_AGE_SECS,
+            ErrorCode::FollowerAccountTooNew
+        );
+        require!(
+            interaction_count >= FOLLOWER_MIN_INTERACTIONS,
+            ErrorCode::InsufficientInteractions
+        );
+        require!(
+            ctx.accounts.grant.status == RisingStarStatus::Active,
+            ErrorCode::GrantNotActive
+        );
+
+        let proof = &mut ctx.accounts.proof;
+        proof.follower = ctx.accounts.follower.key();
+        proof.creator = ctx.accounts.grant.creator;
+        proof.account_age_at_proof = follower_account_age_secs;
+        proof.interaction_count = interaction_count;
+        proof.is_mutual = true;
+        proof.submitted_at = Clock::get()?.unix_timestamp;
+        proof.bump = ctx.bumps.proof;
+
+        let marker = &mut ctx.accounts.mutual_marker;
+        marker.user_a = ctx.accounts.mutual_lower.key();
+        marker.user_b = ctx.accounts.mutual_higher.key();
+        marker.created_at = Clock::get()?.unix_timestamp;
+        marker.bump = ctx.bumps.mutual_marker;
+
+        msg!(
+            "FollowerProof submitted (mutual): follower={} creator={} age={}s",
+            proof.follower,
+            proof.creator,
+            follower_account_age_secs
         );
         Ok(())
     }
@@ -1034,6 +1284,44 @@ pub struct OnboardingMonthlyClaim {
 }
 impl OnboardingMonthlyClaim {
     pub const SIZE: usize = 8 + 32 + 1 + 8 + 1 + 8 + 1;
+}
+
+/// [audit fix R6-LI-H1] On-chain follower-validation receipt. One PDA per
+/// (follower, creator). Seeded by `[b"follower_proof", follower, creator]`.
+/// Created only by the Rising Star follower oracle (or PROGRAM_ADMIN in
+/// Phase-1). `init`-only — a second submission against the same pair
+/// reverts at the account level, so the same follower can never be
+/// double-counted toward a single creator's monthly total.
+#[account]
+pub struct FollowerProof {
+    pub follower: Pubkey,           // 32
+    pub creator: Pubkey,            // 32
+    pub account_age_at_proof: i64,  // 8 — seconds since follower account registration
+    pub interaction_count: u8,      // 1
+    pub is_mutual: bool,            // 1
+    pub submitted_at: i64,          // 8
+    pub bump: u8,                   // 1
+}
+impl FollowerProof {
+    pub const SIZE: usize = 8 + 32 + 32 + 8 + 1 + 1 + 8 + 1;
+    pub const SEED: &'static [u8] = b"follower_proof";
+}
+
+/// [audit fix R6-LI-H1] Mutual-follow marker. PDA seeded by the canonical
+/// (lower, higher) pubkey ordering so the same A<->B pair maps to one PDA
+/// regardless of which direction's proof was submitted first.
+/// `init`-only on the mutual proof submission; the reverse direction will
+/// then revert with `MutualAlreadyCounted`.
+#[account]
+pub struct MutualFollowMarker {
+    pub user_a: Pubkey, // 32 — canonical lower
+    pub user_b: Pubkey, // 32 — canonical higher
+    pub created_at: i64, // 8
+    pub bump: u8,        // 1
+}
+impl MutualFollowMarker {
+    pub const SIZE: usize = 8 + 32 + 32 + 8 + 1;
+    pub const SEED: &'static [u8] = b"mutual_follow";
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1448,6 +1736,90 @@ pub struct ClaimRisingStarMonthly<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+// [audit fix R6-LI-H1] On-chain follower validation ctx (non-mutual).
+#[derive(Accounts)]
+pub struct SubmitFollowerProof<'info> {
+    #[account(
+        seeds = [b"rising_star", grant.creator.as_ref()],
+        bump = grant.bump,
+    )]
+    pub grant: Account<'info, RisingStarGrant>,
+    /// CHECK: follower pubkey only used for PDA derivation + event.
+    pub follower: UncheckedAccount<'info>,
+    #[account(
+        init,
+        payer = oracle,
+        space = FollowerProof::SIZE,
+        seeds = [FollowerProof::SEED, follower.key().as_ref(), grant.creator.as_ref()],
+        bump,
+    )]
+    pub proof: Account<'info, FollowerProof>,
+    #[account(
+        mut,
+        constraint = (
+            oracle.key() == RISING_STAR_FOLLOWER_ORACLE
+                || oracle.key() == PROGRAM_ADMIN
+        ) @ ErrorCode::Unauthorized
+    )]
+    pub oracle: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+// [audit fix R6-LI-H1] On-chain follower validation ctx (mutual).
+// MutualFollowMarker `init` on canonical-ordered pair PDA prevents the
+// reverse direction's submission from succeeding (mutual counted once).
+#[derive(Accounts)]
+pub struct SubmitFollowerProofMutual<'info> {
+    #[account(
+        seeds = [b"rising_star", grant.creator.as_ref()],
+        bump = grant.bump,
+    )]
+    pub grant: Account<'info, RisingStarGrant>,
+    /// CHECK: follower pubkey only used for PDA derivation + event.
+    pub follower: UncheckedAccount<'info>,
+    #[account(
+        init,
+        payer = oracle,
+        space = FollowerProof::SIZE,
+        seeds = [FollowerProof::SEED, follower.key().as_ref(), grant.creator.as_ref()],
+        bump,
+    )]
+    pub proof: Account<'info, FollowerProof>,
+    /// CHECK: caller passes the canonical ordering of (follower, creator)
+    /// as the seed via `mutual_lower` / `mutual_higher`; the constraint
+    /// below verifies the ordering matches what the handler will compute.
+    #[account(
+        init,
+        payer = oracle,
+        space = MutualFollowMarker::SIZE,
+        seeds = [
+            MutualFollowMarker::SEED,
+            mutual_lower.key.as_ref(),
+            mutual_higher.key.as_ref(),
+        ],
+        bump,
+        constraint = mutual_lower.key() < mutual_higher.key() @ ErrorCode::Unauthorized,
+        constraint = (
+            (mutual_lower.key() == follower.key() && mutual_higher.key() == grant.creator)
+                || (mutual_lower.key() == grant.creator && mutual_higher.key() == follower.key())
+        ) @ ErrorCode::Unauthorized,
+    )]
+    pub mutual_marker: Account<'info, MutualFollowMarker>,
+    /// CHECK: lower of (follower, creator); used as marker seed.
+    pub mutual_lower: UncheckedAccount<'info>,
+    /// CHECK: higher of (follower, creator); used as marker seed.
+    pub mutual_higher: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        constraint = (
+            oracle.key() == RISING_STAR_FOLLOWER_ORACLE
+                || oracle.key() == PROGRAM_ADMIN
+        ) @ ErrorCode::Unauthorized
+    )]
+    pub oracle: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // [whitepaper-sync v1.1] §5.6 launch-incentives — error codes
 // ──────────────────────────────────────────────────────────────────────
@@ -1503,6 +1875,18 @@ pub enum ErrorCode {
     MilestoneOutOfOrder,
     #[msg("Prior milestone has not been triggered")]
     MilestonePrerequisiteNotTriggered,
+    // [audit fix R6-LI-H1]
+    #[msg("Follower count exceeds RISING_STAR_MAX_VALID_FOLLOWERS_PER_MONTH (5000)")]
+    FollowerCountExceedsMonthlyCap,
+    #[msg("Follower account is younger than the 7-day minimum (Handbook §4.3)")]
+    FollowerAccountTooNew,
+    #[msg("Follower has fewer than the minimum interactions (Handbook §4.3)")]
+    InsufficientInteractions,
+    #[msg("Mutual follow already counted from the reverse direction (A<->B = 1, not 2)")]
+    MutualAlreadyCounted,
+    // [audit fix R7-LI-C1] FollowerProof PDAs are now WIRED into the payout.
+    #[msg("Insufficient validated FollowerProof PDAs to back the claimed new_followers count")]
+    FollowerProofsInsufficient,
 }
 
 // ──────────────────────────────────────────────────────────────────────

@@ -646,6 +646,9 @@ pub mod aura_governance {
         e.top_votes = 0;
         e.finalized = false;
         e.bump = ctx.bumps.election;
+        // [audit fix R6-GE-1] tie-break + global-max state
+        e.top_votes_candidate = Pubkey::default();
+        e.secondary_top_stake = u64::MAX;
 
         emit!(ElectionOpened {
             election_id: id,
@@ -746,8 +749,23 @@ pub mod aura_governance {
         election.votes_total = election.votes_total
             .checked_add(vote_weight)
             .ok_or(CommitteeError::CommitteeOverflow)?;
+        // [audit fix R6-GE-1] tie-break + global-max bookkeeping.
+        // Use `>=` so a candidate climbing INTO a tie at top_votes also
+        // registers (closes R6-M-GE-2 `>` race). For strict-exceed we
+        // overwrite the leader; for equality we resolve via WP §15.2
+        // "lower ORA stake wins on tie".
+        let cand_key = candidate_acc.key();
+        let cand_stake = candidate_acc.candidate_stake_at_registration;
         if candidate_acc.votes_received > election.top_votes {
             election.top_votes = candidate_acc.votes_received;
+            election.top_votes_candidate = cand_key;
+            election.secondary_top_stake = cand_stake;
+        } else if candidate_acc.votes_received == election.top_votes && election.top_votes > 0 {
+            // Tie at the running max. WP §15.2: lower stake wins.
+            if cand_stake < election.secondary_top_stake {
+                election.top_votes_candidate = cand_key;
+                election.secondary_top_stake = cand_stake;
+            }
         }
 
         let ev = &mut ctx.accounts.election_vote;
@@ -768,11 +786,17 @@ pub mod aura_governance {
     }
 
     /// [whitepaper-sync v1.1] §15 elections — Finalize an election after
-    /// `closes_at`. Caller passes the winning Candidate PDA; we verify its
-    /// votes match `election.top_votes` (so no other candidate can beat it).
-    /// Tie-breaking: WP §15.2 says "candidate with lower ORA stake wins"; in
-    /// Phase 1 we accept the first candidate to reach `top_votes` (off-chain
-    /// indexer is expected to resolve the tie when calling).
+    /// `closes_at`.
+    ///
+    /// [audit fix R6-GE-1] tie-break by stake + global-max verification.
+    /// Caller passes the winning Candidate PDA; we verify that
+    ///   (a) its votes match `election.top_votes` (basic check), AND
+    ///   (b) its PDA address matches `election.top_votes_candidate` (the
+    ///       leader chosen during incremental tally with WP §15.2 tie-break
+    ///       applied — lower ORA stake wins on tie).
+    /// This closes both R6-M-GE-1 (off-chain tie-break leakage) and
+    /// R6-M-GE-2 (caller picks among tied candidates) since the leader is
+    /// pinned in election state at vote time.
     pub fn finalize_election(ctx: Context<FinalizeElection>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let election = &mut ctx.accounts.election;
@@ -783,6 +807,12 @@ pub mod aura_governance {
         let winning = &ctx.accounts.winning_candidate;
         require!(
             winning.votes_received == election.top_votes && winning.votes_received > 0,
+            CommitteeError::MismatchedAccounts
+        );
+        // [audit fix R6-GE-1] verify the winner is the on-chain-pinned leader
+        // (closes off-chain tie-break leakage and stale-PDA race).
+        require!(
+            winning.key() == election.top_votes_candidate,
             CommitteeError::MismatchedAccounts
         );
 

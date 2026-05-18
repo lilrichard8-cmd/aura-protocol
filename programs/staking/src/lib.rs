@@ -279,6 +279,39 @@ pub mod aura_staking {
                 .checked_add(reward_per_weight)
                 .ok_or(ErrorCode::Overflow)?;
             pool.reward_pool_balance = pool.reward_pool_balance.checked_add(penalty).ok_or(ErrorCode::Overflow)?;
+        } else if penalty > 0 && new_total_weighted_stake == 0 {
+            // [audit fix R7-M-S1] Last-unstaker branch. Previously the penalty
+            // stayed in vault_token_account (the principal vault) with no
+            // bookkeeping, breaking the invariant
+            // `vault_token_account.amount == total_staked + unclaimed_penalty`
+            // and silently desynchronizing accounting from on-chain reality.
+            //
+            // Fix: physically move the penalty into reward_vault and credit
+            // reward_pool_balance so the funds are recorded in the reward pool
+            // (not stranded in the principal vault). We do NOT bump
+            // accumulated_reward_per_weight (division by zero with
+            // new_total_weighted_stake == 0), so the next staker arriving will
+            // not retroactively claim this slug; the next penalty event that
+            // happens with active stakers (or a future protocol-driven
+            // distribute helper) is responsible for translating the stashed
+            // pool balance into accumulator credits.
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.vault_token_account.to_account_info(),
+                        to: ctx.accounts.reward_vault.to_account_info(),
+                        authority: ctx.accounts.staking_pool.to_account_info(),
+                    },
+                    signer,
+                ),
+                penalty,
+            )?;
+            let pool = &mut ctx.accounts.staking_pool;
+            pool.reward_pool_balance = pool
+                .reward_pool_balance
+                .checked_add(penalty)
+                .ok_or(ErrorCode::Overflow)?;
         }
 
         // [audit fix C-S5] zero stake bookkeeping. The stake_account is closed

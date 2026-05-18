@@ -473,6 +473,13 @@ pub mod aura_content_keys {
 
     /// [whitepaper-sync v1.1] §13 content-keys — Seller delists. Idempotent
     /// via `is_active` flag.
+    // [audit fix R6-CK-H1] close listing on delist for relistability.
+    // Previously delist_key flipped is_active=false but kept the PDA alive;
+    // since list_key uses `init` (not `init_if_needed`) on a PDA seeded only
+    // by [b"listing", key.key()], the seller was permanently locked out of
+    // re-listing the same key (Anchor reverts AccountAlreadyInitialized).
+    // Now the listing account is closed (`close = seller` in DelistKey ctx)
+    // so rent is refunded and a fresh `init` succeeds on subsequent list_key.
     pub fn delist_key(ctx: Context<DelistKey>) -> Result<()> {
         require!(
             ctx.accounts.listing.seller == ctx.accounts.seller.key(),
@@ -503,6 +510,14 @@ pub mod aura_content_keys {
 
         let listing = &ctx.accounts.listing;
         require!(listing.is_active, ContentKeysError::ListingInactive);
+        // [audit fix R6-CK-H2] reject self-buy wash trading.
+        // Mirrors market::royalty::enforce_royalty_on_sale's SellerEqualsBuyer
+        // guard. Without this a seller could buy their own listing to inflate
+        // KeyResold volume / staking-pool inflows / creator royalty receipts.
+        require!(
+            ctx.accounts.buyer.key() != listing.seller,
+            ContentKeysError::SelfBuyForbidden
+        );
         require!(
             listing.key == ctx.accounts.key.key(),
             ContentKeysError::ListingKeyMismatch
@@ -648,17 +663,23 @@ pub mod aura_content_keys {
         }
 
         // ── 7) Transfer key ownership + close listing ──
+        // [audit fix R6-CK-H1] listing PDA is closed via `close = seller`
+        // in BuyListedKey ctx so re-listing is possible. We still mark
+        // is_active = false for any downstream snapshotters that pluck the
+        // pre-close state from logs.
         let key = &mut ctx.accounts.key;
         key.key_owner = ctx.accounts.buyer.key();
 
         let l = &mut ctx.accounts.listing;
         l.is_active = false;
+        let listing_key_for_event = l.key();
+        let listing_seller_for_event = l.seller;
 
         emit!(KeyResold {
             content: ctx.accounts.content.key(),
             key: key.key(),
-            listing: l.key(),
-            seller: l.seller,
+            listing: listing_key_for_event,
+            seller: listing_seller_for_event,
             buyer: key.key_owner,
             list_price_lamports: price,
             seller_proceeds: to_seller,
@@ -857,6 +878,8 @@ pub enum ContentKeysError {
     #[msg("Protocol pools are still placeholders — abort revenue-bearing tx")] PlaceholderProtocolPools,
     // [audit fix R5 M-CK-2]
     #[msg("total_keys_minted at u64::MAX — cannot derive next serial PDA")] KeySerialOverflow,
+    // [audit fix R6-CK-H2]
+    #[msg("Self-buy forbidden — buyer cannot equal listing.seller (wash trading)")] SelfBuyForbidden,
 }
 
 // ─── Account contexts ───────────────────────────────────────────────────────
@@ -1062,13 +1085,17 @@ pub struct ListKey<'info> {
 
 #[derive(Accounts)]
 pub struct DelistKey<'info> {
+    // [audit fix R6-CK-H1] `close = seller` refunds rent and frees the PDA
+    // so the seller can re-list the same key via standard `init` next time.
     #[account(
         mut,
         seeds = [KeyListing::SEED, listing.key.as_ref()],
         bump = listing.bump,
         has_one = seller @ ContentKeysError::Unauthorized,
+        close = seller,
     )]
     pub listing: Account<'info, KeyListing>,
+    #[account(mut)]
     pub seller: Signer<'info>,
 }
 
@@ -1098,13 +1125,22 @@ pub struct BuyListedKey<'info> {
     )]
     pub key: Account<'info, ContentKey>,
 
-    /// Listing — closed (`is_active = false`) on success.
+    /// Listing — closed atomically on success (rent refunded to seller).
+    /// [audit fix R6-CK-H1] `close = seller` so the new owner (buyer) can
+    /// re-list the same key later via standard `init` (no AccountAlreadyInitialized).
     #[account(
         mut,
         seeds = [KeyListing::SEED, key.key().as_ref()],
         bump = listing.bump,
+        has_one = seller @ ContentKeysError::Unauthorized,
+        close = seller,
     )]
     pub listing: Account<'info, KeyListing>,
+
+    /// CHECK: seller pubkey is verified via listing.has_one = seller above.
+    /// Receives rent refund on listing close.
+    #[account(mut, address = listing.seller @ ContentKeysError::Unauthorized)]
+    pub seller: UncheckedAccount<'info>,
 
     #[account(address = ORA_MINT @ ContentKeysError::WrongMint)]
     pub ora_mint: Account<'info, Mint>,

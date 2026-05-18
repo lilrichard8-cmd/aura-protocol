@@ -49,11 +49,19 @@ const OPS_BPS: u64 = 50;
 /// [whitepaper-sync v1.1] Kept for documentation: total = BURN + STAKING + GAS + OPS.
 #[allow(dead_code)]
 const FEE_BPS: u64 = 500;
-const LARGE_TIP_THRESHOLD: u64 = 100_000_000; // 100 ORA (6 decimals)
+// [audit fix R6-DEC-1] livestream 6->9 decimals to match shared mint.
+// The canonical ORA SPL mint has 9 decimals (matches `ora::INITIAL_SUPPLY`
+// = 1_100_000_000 * 1_000_000_000 and `staking::ORA_DECIMALS = 9`).
+// Previously these constants assumed 6 decimals, making 1 ORA in livestream
+// equal 0.001 ORA in staking / governance / reward flows -- silent economic
+// drift across the entire fee/burn/reward pipeline.
+pub const ORA_DECIMALS: u32 = 9;
+const ORA_ONE: u64 = 1_000_000_000; // 1 ORA at 9 decimals
+const LARGE_TIP_THRESHOLD: u64 = 100 * ORA_ONE; // 100 ORA (9 decimals)
 
-/// [audit fix C-L3 / L-L1] Subscription pricing bounds.
-pub const MIN_SUBSCRIPTION_AMOUNT: u64 = 1_000_000;     // 1 ORA (6 decimals)
-pub const MAX_SUBSCRIPTION_AMOUNT: u64 = 1_000_000_000_000; // 1M ORA
+/// [audit fix C-L3 / L-L1] Subscription pricing bounds. [audit fix R6-DEC-1]
+pub const MIN_SUBSCRIPTION_AMOUNT: u64 = 1 * ORA_ONE;         // 1 ORA (9 decimals)
+pub const MAX_SUBSCRIPTION_AMOUNT: u64 = 1_000_000 * ORA_ONE; // 1M ORA (9 decimals)
 
 #[program]
 pub mod aura_livestream {
@@ -587,7 +595,8 @@ pub mod aura_livestream {
 }
 
 fn calculate_boost_multiplier(amount: u64) -> u16 {
-    let ora = amount / 1_000_000;
+    // [audit fix R6-DEC-1] 6->9 decimals: divide by 1e9, not 1e6.
+    let ora = amount / ORA_ONE;
     if ora >= 1000 { 500 }
     else if ora >= 500 { 300 }
     else { 200 }

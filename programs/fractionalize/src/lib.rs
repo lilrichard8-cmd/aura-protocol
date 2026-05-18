@@ -764,15 +764,21 @@ pub mod aura_fractionalize {
 
         // [audit fix C-F6] Only the time check unblocks finalization OR full
         // turnout (everyone voted). Half-turnout no longer counts as "done".
-        let all_voted =
-            license_vote.total_fragments_voted >= fractional_nft.total_fragments;
+        // [audit fix R7-H-F2] Quorum / turnout denominators must use the
+        // circulating supply (`fragments_sold`), NOT the immutable cap
+        // (`total_fragments`). After `sell_fragment` burns reduce circulating
+        // supply, a cap-based denominator can make `required_yes` exceed the
+        // maximum possible vote weight, silently freezing all license votes
+        // for any fnft that has experienced sells.
+        let circulating = fractional_nft.fragments_sold;
+        let all_voted = license_vote.total_fragments_voted >= circulating;
         require!(
             time_elapsed >= voting_period || all_voted,
             ErrorCode::VotingPeriodNotEnded
         );
 
-        // Required yes-votes = threshold_bps * total_fragments / 10_000.
-        let required_yes = (fractional_nft.total_fragments as u128)
+        // Required yes-votes = threshold_bps * fragments_sold / 10_000.
+        let required_yes = (circulating as u128)
             .checked_mul(fractional_nft.vote_threshold_bps as u128)
             .ok_or(ErrorCode::Overflow)?
             .checked_div(10_000)
@@ -808,6 +814,16 @@ pub mod aura_fractionalize {
         let total_fragments: u64;
         let fractional_nft_bump: u8;
         let fragments_owned: u64;
+        // [audit fix R7-H-F1] Snapshot the original owner's pending entitlement
+        // BEFORE sweeping the revenue vault. The owner is only allowed to claim
+        // what they themselves are entitled to. If `vault_lamports -
+        // rent_exempt_min` exceeds the owner's pending, OTHER holders still
+        // have unclaimed distributions sitting in the vault — sweeping the
+        // whole vault would silently steal their share. We therefore reject
+        // reclaim_nft until those holders have claimed (their `claim_revenue`
+        // path drains their pending) and only then can the original owner
+        // sweep their own residual.
+        let owner_pending: u64;
         {
             let fractional_nft = &ctx.accounts.fractional_nft;
             let fragment_holder = &ctx.accounts.fragment_holder;
@@ -821,6 +837,20 @@ pub mod aura_fractionalize {
                 fragment_holder.fragments_owned == fractional_nft.total_fragments,
                 ErrorCode::MustOwnAllFragments
             );
+
+            // [audit fix R7-H-F1] Compute owner's pending payout from the
+            // MasterChef-style accumulator. This is the only amount they may
+            // legitimately receive from the vault.
+            let acc_now = fractional_nft.acc_revenue_per_fragment;
+            let owner_entitled = (fragment_holder.fragments_owned as u128)
+                .checked_mul(acc_now)
+                .ok_or(ErrorCode::Overflow)?
+                .checked_div(REVENUE_ACC_SCALE)
+                .ok_or(ErrorCode::Overflow)?;
+            let owner_pending_u128 = owner_entitled
+                .saturating_sub(fragment_holder.revenue_debt);
+            owner_pending = u64::try_from(owner_pending_u128)
+                .map_err(|_| ErrorCode::Overflow)?;
 
             original_nft = fractional_nft.original_nft;
             total_fragments = fractional_nft.total_fragments;
@@ -868,19 +898,30 @@ pub mod aura_fractionalize {
             1,
         )?;
 
-        // [audit fix C-F7] Sweep any remaining revenue vault lamports above
-        // the rent-exempt floor back to the owner.
+        // [audit fix R7-H-F1 / C-F7] Sweep the revenue vault back to the owner,
+        // but ONLY the portion they are entitled to. If `withdrawable` (vault
+        // lamports above rent floor) exceeds `owner_pending`, OTHER holders
+        // still have unclaimed pending revenue in the vault and the original
+        // owner is not allowed to sweep that residual. Force them to wait
+        // until those holders have claimed, OR explicitly only sweep their
+        // own share. We take the conservative "reject if residual > owner_pending"
+        // path so the holder-side `claim_revenue` invariant is not violated
+        // silently.
         let vault_ai = ctx.accounts.revenue_vault.to_account_info();
         let rent = Rent::get()?;
         let rent_exempt_min = rent.minimum_balance(vault_ai.data_len());
         let vault_lamports = vault_ai.lamports();
-        if vault_lamports > rent_exempt_min {
-            let sweep = vault_lamports - rent_exempt_min;
+        let withdrawable = vault_lamports.saturating_sub(rent_exempt_min);
+        require!(
+            withdrawable <= owner_pending,
+            ErrorCode::PendingPayoutsOutstanding
+        );
+        if withdrawable > 0 {
             **vault_ai.try_borrow_mut_lamports()? = rent_exempt_min;
             let owner_ai = ctx.accounts.owner.to_account_info();
             let pre = owner_ai.lamports();
             **owner_ai.try_borrow_mut_lamports()? = pre
-                .checked_add(sweep)
+                .checked_add(withdrawable)
                 .ok_or(ErrorCode::Overflow)?;
         }
 
@@ -1453,4 +1494,8 @@ pub enum ErrorCode {
     // [audit fix M-F1] vote_threshold_bps must be in [1000, 9999].
     #[msg("Vote threshold bps out of range [1000, 9999]")]
     InvalidVoteThreshold,
+
+    // [audit fix R7-H-F1] reclaim_nft must not steal other holders' pending revenue.
+    #[msg("Other holders still have unclaimed pending revenue; force them to claim before reclaim")]
+    PendingPayoutsOutstanding,
 }

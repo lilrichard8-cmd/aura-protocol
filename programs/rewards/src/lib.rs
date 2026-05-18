@@ -34,8 +34,12 @@ pub enum MintPurpose {
 
 /// Total community incentive allocation: 500M ORA (with 9 decimals)
 pub const TOTAL_INCENTIVE_POOL: u64 = 500_000_000 * 1_000_000_000;
-/// Incentive tax rate: 10% burned (Triple Burn mechanism #1)
-pub const INCENTIVE_TAX_BPS: u64 = 1000; // 10%
+/// [audit fix R6-H-2] Incentive tax (scarcity burn) rate: 5% burned per Handbook §5
+/// (Triple Burn mechanism #1). Previously 10% (1000 bps) which over-taxed every
+/// reward distribution by 5pp vs the documented economic policy. Handbook §5:
+/// "Additional Scarcity Burn at reward distribution: 5% burned before delivery
+/// (a creator earning 10 ORA receives 9.5)."
+pub const INCENTIVE_TAX_BPS: u64 = 500; // 5%
 /// MAU threshold for base reward change
 pub const MAU_THRESHOLD: u64 = 500_000;
 
@@ -153,24 +157,35 @@ pub mod aura_rewards {
             ContentTier::Professional => 300,
             ContentTier::Exceptional => 500,
         };
+        // [audit fix R7-M-1] replace .unwrap() with .ok_or(Overflow)? mirroring
+        // distribute_curation_reward's D-L-2 fix; corrupt creation_ratio_bps or
+        // extreme MAU should produce a clean Anchor error, not a BPF panic.
         let raw_reward = (base_reward as u128)
             .checked_mul(tier_multiplier as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(100)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
 
         let phase_reward = (raw_reward as u128)
             .checked_mul(creation_ratio_bps as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
 
         let burn_amount = (phase_reward as u128)
             .checked_mul(INCENTIVE_TAX_BPS as u128)
-            .unwrap()
+            .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
-            .unwrap() as u64;
+            .ok_or(ErrorCode::Overflow)? as u64;
         let net_reward = phase_reward.checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?;
+
+        // [audit fix R7-M-2] mirror D2.M-1 cap on the creation path so a
+        // compromised REWARD_DISTRIBUTOR key cannot drain the 500M pool by
+        // repeatedly calling distribute_creation_reward(Exceptional).
+        require!(
+            net_reward <= PER_CALL_DISTRIBUTION_CAP,
+            ErrorCode::PerCallCapExceeded
+        );
 
         let seeds = &[b"reward_state".as_ref(), &[bump]];
         let signer = &[&seeds[..]];

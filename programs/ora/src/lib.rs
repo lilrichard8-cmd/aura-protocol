@@ -353,7 +353,8 @@ pub mod aura_ora {
         Ok(())
     }
 
-    /// Triple burn: incentive tax (10% of rewards), tx fee burn (2.5% of 5% fee with MAU multiplier),
+    /// Triple burn: incentive tax (5% of rewards per Handbook §5 [audit fix R6-H-2]),
+    /// tx fee burn (2.5% of 5% fee with MAU multiplier),
     /// and Type B feature burn (95% of feature payment)
     pub fn triple_burn(
         ctx: Context<TripleBurn>,
@@ -366,9 +367,10 @@ pub mod aura_ora {
         // and final u128→u64 narrowing fails fast with `Overflow` instead of silent wrap.
         let burn_amount: u64 = match burn_type {
             BurnType::IncentiveTax => {
-                // 10% of reward distribution gets burned
+                // [audit fix R7-H-1] scarcity burn 10%->5% per Handbook §5
+                // (matches `distribute_reward` and `INCENTIVE_TAX_BPS = 500` in rewards/lib.rs)
                 let v = (amount as u128)
-                    .checked_mul(10)
+                    .checked_mul(5)
                     .ok_or(ErrorCode::Overflow)?
                     / 100u128;
                 u64::try_from(v).map_err(|_| ErrorCode::Overflow)?
@@ -457,16 +459,23 @@ pub mod aura_ora {
 
         // Bonus: 18 / (1 + MAU / 50000), in ORA with 9 decimals
         // = 18e9 / (1 + MAU/50000) = 18e9 * 50000 / (50000 + MAU)
-        let bonus = (18u128 * 1_000_000_000 * 50_000)
+        // [audit fix R6-H-1] activity coefficient 18->48 to match rewards path & Handbook §11
+        // Handbook §11 Activity Reward formula: Reward = Base + 48 / (1 + MAU / 50000)
+        // The parallel rewards::distribute_creation_reward correctly uses 48; this path
+        // was missed during wp-sync. Discrepancy was causing ~38% short-payouts here vs
+        // the rewards path.
+        let bonus = (48u128 * 1_000_000_000 * 50_000)
             .checked_div(50_000u128 + mau as u128)
             .unwrap_or(0) as u64;
 
         // [audit fix round2 E2.M-1] graceful overflow handling
         let total_reward = base.checked_add(bonus).ok_or(ErrorCode::Overflow)?;
 
-        // Burn 10% (incentive tax)
+        // [audit fix R6-H-2] scarcity burn 10%->5% per Handbook §5
+        // Handbook §5: "Additional Scarcity Burn at reward distribution: 5% burned
+        // before delivery (a creator earning 10 ORA receives 9.5)."
         let burn_amount = total_reward
-            .checked_mul(10)
+            .checked_mul(5)
             .ok_or(ErrorCode::Overflow)?
             .checked_div(100)
             .ok_or(ErrorCode::Overflow)?;
@@ -528,7 +537,7 @@ pub mod aura_ora {
         // (Persistence already happened pre-CPI above.)
         let config = &ctx.accounts.ora_config;
 
-        msg!("Reward distributed: {} ORA (withheld {} incentive tax, cumulative minted {}, total_burned {})", net_reward, burn_amount, new_total, config.total_burned);
+        msg!("Reward distributed: {} ORA (withheld {} 5% scarcity burn / incentive tax [R6-H-2], cumulative minted {}, total_burned {})", net_reward, burn_amount, new_total, config.total_burned);
         Ok(())
     }
 

@@ -118,6 +118,11 @@ impl CommitteeSeat {
 /// [whitepaper-sync v1.1] §15 elections — One election per `(committee, seat_index)`
 /// per term. Each election has its own monotonic `election_id` to disambiguate
 /// re-elections / by-elections on the same seat.
+///
+/// [audit fix R6-GE-1] Added `top_votes_candidate` (current leader's PDA) and
+/// `secondary_top_stake` (lowest stake among candidates currently tied at
+/// top_votes) so finalize can verify global-max + WP §15.2 tie-break
+/// (lower stake wins) on-chain instead of trusting the caller.
 #[account]
 pub struct Election {
     pub election_id: u64,       // 8
@@ -132,10 +137,16 @@ pub struct Election {
     pub top_votes: u64,         // 8  (running max for incremental tally)
     pub finalized: bool,        // 1
     pub bump: u8,               // 1
+    // [audit fix R6-GE-1] global-max + tie-break support
+    pub top_votes_candidate: Pubkey, // 32 — Candidate PDA currently at top_votes
+    pub secondary_top_stake: u64,    // 8  — lowest stake among current top_votes-ties
 }
 
 impl Election {
-    pub const SIZE: usize = 8 + 8 + 1 + 1 + 8 + 8 + 8 + 4 + 8 + 32 + 8 + 1 + 1;
+    pub const SIZE: usize =
+        8 + 8 + 1 + 1 + 8 + 8 + 8 + 4 + 8 + 32 + 8 + 1 + 1
+        + 32 // top_votes_candidate
+        + 8; // secondary_top_stake
 }
 
 /// [whitepaper-sync v1.1] §15 elections — One per (election, candidate).
