@@ -25,7 +25,10 @@ pub enum MintPurpose {
     AdHoc = 0,
     /// Reward distribution via `ora::distribute_reward`
     DistributeReward = 1,
-    /// Initial 1.05B supply via `ora::mint_initial_supply`
+    /// [audit fix R5 L-R-1] / [whitepaper-sync v1.1] Initial 1.1B supply via
+    /// `ora::mint_initial_supply`. (Comment previously said 1.05B from the
+    /// pre-v1.1 era; the actual mint amount is supplied by the `ora` program
+    /// and is now 1.1B per `ora::INITIAL_SUPPLY`.)
     InitialSupply = 2,
 }
 
@@ -35,6 +38,32 @@ pub const TOTAL_INCENTIVE_POOL: u64 = 500_000_000 * 1_000_000_000;
 pub const INCENTIVE_TAX_BPS: u64 = 1000; // 10%
 /// MAU threshold for base reward change
 pub const MAU_THRESHOLD: u64 = 500_000;
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.6 Launch Incentives sub-pool tracking constants.
+//
+// Total 150M ORA split equally across three programs:
+//   Million Plan          50M  (DAU milestone-unlocked rewards — Handbook §4.1)
+//   Creator Onboarding    50M  (1 follower = 1 ORA, per-creator cap 1M — §4.2)
+//   Rising Star Plan      50M  (1 AURA follower = 1 ORA, monthly cap 5K — §4.3)
+//
+// These are documentation/tracking constants only. The actual distribution
+// machinery is out of scope for this sync batch — a dedicated
+// `launch-incentives` program will land in a later sync. We surface the
+// allocations here so existing reward tooling can reason about the
+// budget envelope without hard-coding values inline.
+// ──────────────────────────────────────────────────────────────────────
+pub const LAUNCH_INCENTIVE_MILLION_PLAN_POOL: u64 = 50_000_000 * 1_000_000_000;
+pub const LAUNCH_INCENTIVE_ONBOARDING_POOL: u64 = 50_000_000 * 1_000_000_000;
+pub const LAUNCH_INCENTIVE_RISING_STAR_POOL: u64 = 50_000_000 * 1_000_000_000;
+pub const LAUNCH_INCENTIVE_TOTAL: u64 = 150_000_000 * 1_000_000_000;
+const _: () = assert!(
+    LAUNCH_INCENTIVE_MILLION_PLAN_POOL
+        + LAUNCH_INCENTIVE_ONBOARDING_POOL
+        + LAUNCH_INCENTIVE_RISING_STAR_POOL
+        == LAUNCH_INCENTIVE_TOTAL,
+    "[whitepaper-sync v1.1] Launch incentive sub-pools must sum to 150M"
+);
 /// [audit fix D2.M-1] Per-call cap on a single distribution. Bounds the
 /// damage if the REWARD_DISTRIBUTOR key is misused (or a CPI integration is
 /// mis-wired) so no single transaction can drain a large fraction of the 500M
@@ -86,9 +115,15 @@ pub mod aura_rewards {
     }
 
     /// Distribute creation reward with Model C formula
-    /// Reward = Base + 18 / (1 + MAU / 50000)
+    /// Reward = Base + 48 / (1 + MAU / 50000)
     /// Base = 2 (MAU < 500k) or 1 (MAU >= 500k)
     /// 5 content tiers multiply the base reward
+    ///
+    /// [whitepaper-sync v1.1] Coefficient 18 → 48. Numbers Handbook §11 +
+    /// Whitepaper v1.1 §11.1 / §7.9 both explicitly cite **48** as the
+    /// Activity Rewards formula coefficient. The old value (18) produced
+    /// ~20 ORA per action at launch instead of the documented ~50 ORA.
+    /// Tier-III adjustable parameter per WP §19.5.
     pub fn distribute_creation_reward(
         ctx: Context<DistributeCreationReward>,
         content_tier: ContentTier,
@@ -100,9 +135,9 @@ pub mod aura_rewards {
         // Calculate raw reward using Model C formula (in ORA tokens with 9 decimals)
         // FIX #11: Use u128 throughout to prevent overflow
         let base: u64 = if current_mau < MAU_THRESHOLD { 2 } else { 1 };
-        // Reward = Base + 18 / (1 + MAU / 50000)
-        // = Base + 18 * 50000 / (50000 + MAU)  (all in ORA with 9 decimals)
-        let decay_component = (18u128 * 1_000_000_000u128 * 50_000u128)
+        // [whitepaper-sync v1.1] Reward = Base + 48 / (1 + MAU / 50000)
+        // = Base + 48 * 50000 / (50000 + MAU)  (all in ORA with 9 decimals)
+        let decay_component = (48u128 * 1_000_000_000u128 * 50_000u128)
             .checked_div(50_000u128 + current_mau as u128)
             .unwrap_or(0) as u64;
         let base_reward = base

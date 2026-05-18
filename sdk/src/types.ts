@@ -16,6 +16,14 @@ export interface AuraClientConfig {
     opsTreasuryPool: PublicKey;
     oraMint: PublicKey;
   };
+  /** [whitepaper-sync v1.1] §13 content-keys — Per-network content-keys
+   *  module config (defaults to marketConfig pools when omitted). */
+  contentKeysConfig?: {
+    oraMint: PublicKey;
+    stakingRewardsPool: PublicKey;
+    gasReservePool: PublicKey;
+    opsTreasuryPool: PublicKey;
+  };
 }
 
 /**

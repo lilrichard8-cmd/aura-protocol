@@ -377,6 +377,19 @@ pub mod aura_staking {
     /// reward_source must be the hardcoded REWARD_SOURCE_TREASURY, AND
     /// reward_vault must be owned by the staking_pool PDA (enforced by
     /// constraint in the accounts struct).
+    ///
+    /// [whitepaper-sync v1.1] TODO: Whitepaper §14.4 specifies three reward
+    /// sources for stakers:
+    ///   (1) 20% of annual perpetual emission — NOT IMPLEMENTED. Requires a
+    ///       year-based emission scheduler in `programs/ora` (currently absent;
+    ///       see diff report Critical-4) feeding `REWARD_SOURCE_TREASURY`.
+    ///   (2) 2% of every ORA transaction fee — PARTIALLY IMPLEMENTED. The fee
+    ///       split lands in `STAKING_REWARDS_POOL` via market/CC/bounty paths;
+    ///       this ix simply forwards from `REWARD_SOURCE_TREASURY` and assumes
+    ///       upstream routing is correct.
+    ///   (3) Curation surplus when daily curation intake exceeds the 20,000
+    ///       ORA cap — NOT IMPLEMENTED. Requires a cross-program transfer from
+    ///       `programs/curation` into this pool. Future work.
     pub fn update_daily_rewards(ctx: Context<UpdateDailyRewards>, reward_amount: u64) -> Result<()> {
         let pool = &mut ctx.accounts.staking_pool;
         let now = Clock::get()?.unix_timestamp;
@@ -423,30 +436,44 @@ pub mod aura_staking {
 
 // === Constants ===
 
-/// [audit fix M-S1 / R2-M-S1] Minimum stake amount = 1 ORA at
-/// `ORA_DECIMALS`. Keeps the reward-per-weight math out of the
-/// rounding-to-zero regime AND keys off the canonical decimals constant so
-/// future decimal changes propagate automatically.
-pub const MIN_STAKE_AMOUNT: u64 = 10u64.pow(ORA_DECIMALS as u32);
+/// [audit fix M-S1 / R2-M-S1] Minimum stake amount.
+/// [whitepaper-sync v1.1] Whitepaper §14.2 + Numbers Handbook §14 mandate a
+/// floor of **1,000 ORA** (not 1 ORA). This protects the reward-per-weight
+/// math from rounding-to-zero AND aligns with the published economic spec.
+/// Keyed off `ORA_DECIMALS` so a future decimals change auto-propagates.
+pub const MIN_STAKE_AMOUNT: u64 = 1_000u64
+    .checked_mul(10u64.pow(ORA_DECIMALS as u32))
+    .expect("MIN_STAKE_AMOUNT overflow at compile-time");
 
 // === Enums ===
 
+// [audit fix R5 H-S-1] WP v1.1 §14 + Numbers Handbook §14 mandate FOUR lockup
+// tiers: 1mo / 3mo / 6mo / 12mo with multipliers 1.0x / 1.0x / 1.5x / 2.0x.
+// The previous enum shipped 1d / 30d / 90d / 180d — the 1-day tier has no
+// WP basis, and the 12-month tier (which carries the 2.0x multiplier) was
+// missing entirely (180d incorrectly absorbed 2.0x). This is a BREAKING
+// on-chain enum change: SDK + frontend follow in lockstep.
+//
+// Months are 30-day buckets (`SECONDS_PER_MONTH = 30 * 24 * 3600`), matching
+// the cadence used by launch-incentives::ONBOARDING_MONTH_SECS.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq)]
 pub enum LockupTier {
-    OneDay,
-    ThirtyDays,
-    NinetyDays,
-    OneEightyDays,
+    OneMonth,     // 30 days,  1.0x
+    ThreeMonths,  // 90 days,  1.0x
+    SixMonths,    // 180 days, 1.5x
+    TwelveMonths, // 360 days, 2.0x
 }
 
 impl LockupTier {
-    /// Returns (lockup_days, multiplier_bps)
+    /// Returns (lockup_days, multiplier_bps).
+    /// [audit fix R5 H-S-1] / [whitepaper-sync v1.1] WP §14.3 + Numbers
+    /// Handbook §14: 1mo=1.0x / 3mo=1.0x / 6mo=1.5x / 12mo=2.0x.
     pub fn params(&self) -> (u32, u16) {
         match self {
-            LockupTier::OneDay => (1, 10000),        // 1x
-            LockupTier::ThirtyDays => (30, 12500),   // 1.25x
-            LockupTier::NinetyDays => (90, 17500),   // 1.75x
-            LockupTier::OneEightyDays => (180, 25000), // 2.5x
+            LockupTier::OneMonth     => (30,  10000), // 1.0x
+            LockupTier::ThreeMonths  => (90,  10000), // 1.0x
+            LockupTier::SixMonths    => (180, 15000), // 1.5x
+            LockupTier::TwelveMonths => (360, 20000), // 2.0x
         }
     }
 }

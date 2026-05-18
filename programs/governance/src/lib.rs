@@ -1,8 +1,46 @@
+// [whitepaper-sync v1.1] TODO — Whitepaper v1.1 §15/§19 + Numbers Handbook §13/§14
+// describe several governance features that are NOT implemented in this
+// program and that would require net-new programs (out of scope for this
+// sync batch):
+//
+//   1. Committee seats + semi-annual elections (WP §15.2)
+//      - 5 committees × 7 seats each
+//      - ≥10,000 ORA staked nomination threshold
+//      - 60% recall threshold
+//      - Term rules, alternates, by-elections, multi-committee restrictions
+//      Today the contract only has a `CommitteeType` enum; no `CommitteeSeat`
+//      account, no election state machine, no recall ix. Building this is a
+//      dedicated `committee-elections` program.
+//
+//   2. Frontend Registry (Handbook §13, WP §18)
+//      - Tier 1 Unverified (bond = 0) / Tier 2 Verified (bond = 10,000 ORA)
+//      - Slashing 25%–100% by Arbitration Committee (5/7 + 7-member appeal)
+//      - Bond adjustment via Tier III (50% majority)
+//      - Full Frontend Blacklist via Tier II (75%)
+//      - 30-day deregistration cooldown, frontend reputation score, etc.
+//      Today: nothing on-chain. Future `frontend-registry` program.
+//
+//   3. Content Review Panel (CRS, WP §15.9) and structured Penalty Levels I–IV
+//      (WP §15.10) are absent from the dispute-resolution surface here.
+//
+//   4. The `MIN_STAKE_LAMPORTS = 10_000 * 1e9` arbitrator floor in
+//      `arbitration.rs` coincides with the WP §18.3 frontend bond number but
+//      is a different mechanism (arbitrator collateral, not frontend bond).
+//
+// What IS in scope and IS implemented in this batch:
+//   • `ProposalTier` enum (TierI / II / III / IV) added to `Proposal` and
+//     enforced in `execute_proposal` (75% / 50% / 50%; Tier I rejected at
+//     create time).
+//
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount as SplTokenAccount, Transfer as SplTransfer};
 
 pub mod arbitration;
 pub use arbitration::*;
+
+// [whitepaper-sync v1.1] §15 elections — Committee elections + recall module.
+pub mod committee;
+pub use committee::*;
 
 declare_id!("7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk");
 
@@ -54,6 +92,8 @@ pub mod aura_governance {
         config.quorum = quorum;
         // [audit fix C-G2] gate arbitration off by default.
         config.arbitration_enabled = false;
+        // [whitepaper-sync v1.1] §15 elections — gate off until Phase 2.
+        config.elections_enabled = false;
         config.bump = ctx.bumps.governance_config;
         Ok(())
     }
@@ -95,9 +135,23 @@ pub mod aura_governance {
     // Solana, but signature allowed up to 100 → DoS for long titles). The
     // proposal PDA is now seeded by `governance_config.proposal_count`
     // (monotonic id) instead.
-    pub fn create_proposal(ctx: Context<CreateProposal>, title: String, description: String, committee_type: CommitteeType, proposal_type: ProposalType) -> Result<()> {
+    //
+    // [whitepaper-sync v1.1] Added `tier: ProposalTier` arg per Handbook §14 +
+    // WP §15/§19 four-tier governance system. The tier dictates the approval
+    // threshold enforced in `execute_proposal` (Tier I rejected on-chain;
+    // Tier II 75%; Tier III 50%; Tier IV committee-internal). Tier I changes
+    // are immutable at this contract level and must follow the off-chain
+    // Constitutional Amendment Process (WP §19.2) before any related code
+    // change ships.
+    pub fn create_proposal(ctx: Context<CreateProposal>, title: String, description: String, committee_type: CommitteeType, proposal_type: ProposalType, tier: ProposalTier) -> Result<()> {
         require!(title.len() <= 100, ErrorCode::TitleTooLong);
         require!(description.len() <= 5000, ErrorCode::DescriptionTooLong);
+        // [whitepaper-sync v1.1] Tier I parameters are immutable at the
+        // contract layer. Any Tier I proposal MUST be filed off-chain through
+        // the Constitutional Amendment Process (95% supermajority + all 5
+        // committees + 1-year notice, WP §19.2). Reject on-chain to prevent
+        // misuse.
+        require!(tier != ProposalTier::TierI, ErrorCode::TierIImmutable);
         let p = &mut ctx.accounts.proposal;
         let clock = Clock::get()?;
         // [audit fix L-G2] capture the assigned id (== current proposal_count)
@@ -105,6 +159,7 @@ pub mod aura_governance {
         p.proposal_id = proposal_id;
         p.proposer = ctx.accounts.proposer.key(); p.title = title; p.description = description;
         p.committee_type = committee_type; p.proposal_type = proposal_type;
+        p.tier = tier;
         p.status = ProposalStatus::Voting; p.votes_for = 0; p.votes_against = 0; p.total_votes = 0;
         p.created_at = clock.unix_timestamp; p.voting_ends_at = clock.unix_timestamp + 604800;
         p.bump = ctx.bumps.proposal;
@@ -155,9 +210,33 @@ pub mod aura_governance {
         require!(signer == cfg.admin || signer == proposal.proposer, ErrorCode::Unauthorized);
         // [audit fix C-22] enforce quorum: total weighted votes must meet config.quorum
         require!(proposal.total_votes >= cfg.quorum, ErrorCode::QuorumNotReached);
+
+        // [whitepaper-sync v1.1] Tier-based approval threshold per Handbook §14
+        // + WP §19. The contract enforces yes-vote fraction:
+        //   Tier II  → ≥7,500 bps (75%) of decisive votes (for + against)
+        //   Tier III → >5,000 bps (>50%) of decisive votes (strict majority)
+        //   Tier IV  → committee-internal; treated as standard 50% here, but
+        //              the committee gate happens off-chain (Tier IV decisions
+        //              don't normally hit the proposal pipeline at all).
+        //   Tier I   → already rejected at create time; cannot reach here.
+        let decisive = proposal.votes_for
+            .checked_add(proposal.votes_against)
+            .ok_or(ErrorCode::Overflow)?;
+        require!(decisive > 0, ErrorCode::InvalidVoteWeight);
+        let yes_bps = (proposal.votes_for as u128)
+            .checked_mul(10_000)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(decisive as u128)
+            .ok_or(ErrorCode::Overflow)? as u64;
+        let passed = match proposal.tier {
+            ProposalTier::TierI => false, // unreachable; create_proposal rejects
+            ProposalTier::TierII => yes_bps >= 7_500,
+            ProposalTier::TierIII => yes_bps > 5_000,
+            ProposalTier::TierIV => yes_bps > 5_000,
+        };
         // [audit fix H-G2] move to Passed or Failed; downstream `mark_executed`
         // transitions to Executed so indexers can distinguish.
-        proposal.status = if proposal.votes_for > proposal.votes_against { ProposalStatus::Passed } else { ProposalStatus::Failed };
+        proposal.status = if passed { ProposalStatus::Passed } else { ProposalStatus::Failed };
         Ok(())
     }
 
@@ -461,6 +540,398 @@ pub mod aura_governance {
         Ok(())
     }
 
+    // =========================================================================
+    // [whitepaper-sync v1.1] §15 elections — Committee Elections + Recall
+    // =========================================================================
+
+    /// [whitepaper-sync v1.1] §15 elections — One-time init of the
+    /// committee registry (counter PDA). PROGRAM_ADMIN-gated.
+    pub fn init_committee_registry(ctx: Context<InitCommitteeRegistry>) -> Result<()> {
+        let reg = &mut ctx.accounts.committee_registry;
+        reg.next_election_id = 0;
+        reg.next_recall_proposal_id = 0;
+        reg.bump = ctx.bumps.committee_registry;
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Toggle elections gate.
+    /// PROGRAM_ADMIN-only. Mirrors `set_arbitration_enabled`.
+    pub fn set_elections_enabled(ctx: Context<SetElectionsEnabled>, enabled: bool) -> Result<()> {
+        let cfg = &mut ctx.accounts.governance_config;
+        cfg.elections_enabled = enabled;
+        msg!("Elections enabled = {}", enabled);
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — One-time PDA init for a
+    /// (committee, seat_index) seat. PROGRAM_ADMIN-gated. Must be called once
+    /// for each of the 35 (5 committees × 7 seats) seats before the first
+    /// election on that seat.
+    ///
+    /// Caller passes `committee_disc` (1-byte discriminant used as the seed)
+    /// and `committee` (typed enum stored on-chain). The handler verifies
+    /// they match so the on-chain copy can never disagree with the PDA seed.
+    pub fn init_committee_seat(
+        ctx: Context<InitCommitteeSeat>,
+        committee_disc: u8,
+        seat_index: u8,
+        committee: CommitteeType,
+    ) -> Result<()> {
+        require!(seat_index < SEATS_PER_COMMITTEE, CommitteeError::SeatIndexOutOfRange);
+        require!(committee.discriminant() == committee_disc, CommitteeError::MismatchedAccounts);
+        let seat = &mut ctx.accounts.committee_seat;
+        seat.committee = committee;
+        seat.seat_index = seat_index;
+        seat.holder = Pubkey::default();
+        seat.elected_at = 0;
+        seat.term_ends_at = 0;
+        seat.recalled = false;
+        seat.bump = ctx.bumps.committee_seat;
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Open a new election for
+    /// (committee, seat_index).
+    /// Phase 1 (Year 1): caller MUST equal PROGRAM_ADMIN.
+    /// Phase 2+ (`elections_enabled = true`): any caller can open elections
+    /// for seats whose `term_ends_at` has passed (or that are vacant).
+    ///
+    /// `committee_disc` must equal `committee.discriminant()` (handler
+    /// double-checks the seed/typed-arg match).
+    pub fn open_election(
+        ctx: Context<OpenElection>,
+        committee_disc: u8,
+        seat_index: u8,
+        committee: CommitteeType,
+    ) -> Result<()> {
+        require!(seat_index < SEATS_PER_COMMITTEE, CommitteeError::SeatIndexOutOfRange);
+        require!(committee.discriminant() == committee_disc, CommitteeError::MismatchedAccounts);
+        let cfg = &ctx.accounts.governance_config;
+        let caller = ctx.accounts.caller.key();
+        let seat = &ctx.accounts.committee_seat;
+        require!(seat.committee == committee, CommitteeError::MismatchedAccounts);
+        require!(seat.seat_index == seat_index, CommitteeError::SeatIndexOutOfRange);
+
+        let now = Clock::get()?.unix_timestamp;
+
+        // Phase 1: PROGRAM_ADMIN-gated. Phase 2+: anyone, but the seat must
+        // be vacant / past term / recalled.
+        if !cfg.elections_enabled {
+            // [audit fix R5 M-GE-1] standardize on parent ErrorCode::Unauthorized
+            // for SDK error-decoder consistency (CommitteeError::Unauthorized
+            // had a different discriminant from ErrorCode::Unauthorized).
+            require!(caller == PROGRAM_ADMIN, ErrorCode::Unauthorized);
+        } else if seat.holder != Pubkey::default() && !seat.recalled {
+            // Held seat: term must have ended.
+            require!(now >= seat.term_ends_at, CommitteeError::SeatTermActive);
+        }
+
+        // Capture the discriminant ahead of the move-into-`e.committee`.
+        let committee_disc_for_event = committee.discriminant();
+
+        let reg = &mut ctx.accounts.committee_registry;
+        let id = reg.next_election_id;
+        reg.next_election_id = id.checked_add(1).ok_or(CommitteeError::CommitteeOverflow)?;
+
+        let e = &mut ctx.accounts.election;
+        e.election_id = id;
+        e.committee = committee;
+        e.seat_index = seat_index;
+        e.opens_at = now;
+        e.candidacy_closes_at = now.checked_add(CANDIDACY_WINDOW_SECS).ok_or(CommitteeError::CommitteeOverflow)?;
+        e.closes_at = e.candidacy_closes_at.checked_add(ELECTION_WINDOW_SECS).ok_or(CommitteeError::CommitteeOverflow)?;
+        e.candidates_count = 0;
+        e.votes_total = 0;
+        e.winner = Pubkey::default();
+        e.top_votes = 0;
+        e.finalized = false;
+        e.bump = ctx.bumps.election;
+
+        emit!(ElectionOpened {
+            election_id: id,
+            committee: committee_disc_for_event,
+            seat_index,
+            opens_at: e.opens_at,
+            closes_at: e.closes_at,
+        });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Register a candidate during
+    /// the candidacy window. `declared_stake` is a self-declared snapshot of
+    /// the candidate's ORA stake; it must be ≥ STAKING_MIN_FOR_CANDIDACY.
+    /// Full enforcement against the staking program's StakeAccount is
+    /// deferred to Batch 6 (election snapshots).
+    pub fn register_candidate(
+        ctx: Context<RegisterCandidate>,
+        declared_stake: u64,
+    ) -> Result<()> {
+        // [audit fix R5 H-GE-2] gate candidacy on the global `elections_enabled`
+        // flag. Phase 1 ships with the flag = false (admin must flip it), so a
+        // freshly-funded keypair cannot self-declare a stake of `u64::MAX` and
+        // park themselves on a candidate slot waiting for the elections to
+        // open. Once the Batch-6 stake-snapshot program lands, the admin can
+        // enable elections and a real on-chain proof will replace the
+        // self-declared stake. Until then, the elections_enabled gate +
+        // STAKING_MIN_FOR_CANDIDACY floor + per-vote MAX_VOTE_WEIGHT cap
+        // together bound the damage of a compromised stake declaration.
+        require!(
+            ctx.accounts.governance_config.elections_enabled,
+            CommitteeError::ElectionsDisabled
+        );
+        require!(declared_stake >= STAKING_MIN_FOR_CANDIDACY, CommitteeError::InsufficientCandidacyStake);
+        let now = Clock::get()?.unix_timestamp;
+        let candidate_key = ctx.accounts.candidate.key();
+        let bump_c = ctx.bumps.candidate_account;
+
+        let election = &mut ctx.accounts.election;
+        require!(!election.finalized, CommitteeError::ElectionAlreadyFinalized);
+        require!(now < election.candidacy_closes_at, CommitteeError::CandidacyClosed);
+
+        let c = &mut ctx.accounts.candidate_account;
+        c.election = election.key();
+        c.candidate = candidate_key;
+        c.votes_received = 0;
+        c.candidate_stake_at_registration = declared_stake;
+        c.registered_at = now;
+        c.bump = bump_c;
+
+        election.candidates_count = election.candidates_count
+            .checked_add(1)
+            .ok_or(CommitteeError::CommitteeOverflow)?;
+
+        emit!(CandidateRegistered { election_id: election.election_id, candidate: candidate_key, registered_at: now });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Cast a vote for a candidate.
+    /// One vote per (election, voter), enforced by the ElectionVote PDA.
+    /// vote_weight is caller-supplied (Phase 1); the SDK is expected to
+    /// compute √(staked_ora) capped at MAX_VOTE_WEIGHT.
+    pub fn cast_election_vote(
+        ctx: Context<CastElectionVote>,
+        vote_weight: u64,
+    ) -> Result<()> {
+        // [audit fix R5 H-GE-1] elections_enabled gate + hard cap on
+        // vote_weight at MAX_VOTE_WEIGHT (= 10,000, mirrors the staking-weight
+        // cap in `vote_on_proposal`). Previously a single voter could cast
+        // `u64::MAX/2` weight and seat themselves; the cap keeps damage
+        // bounded to a single vote’s share even with self-declared weights.
+        // The Batch-6 stake-snapshot program will replace self-declared
+        // weight with an on-chain √(stake) proof; until then, this cap +
+        // `elections_enabled = false` (Phase 1 default) is the firewall.
+        require!(
+            ctx.accounts.governance_config.elections_enabled,
+            CommitteeError::ElectionsDisabled
+        );
+        require!(vote_weight > 0, CommitteeError::InvalidVoteWeight);
+        require!(
+            vote_weight <= MAX_VOTE_WEIGHT,
+            CommitteeError::InvalidVoteWeight
+        );
+        let now = Clock::get()?.unix_timestamp;
+        let voter_key = ctx.accounts.voter.key();
+        let bump_ev = ctx.bumps.election_vote;
+
+        let election = &mut ctx.accounts.election;
+        require!(!election.finalized, CommitteeError::ElectionAlreadyFinalized);
+        require!(now >= election.candidacy_closes_at, CommitteeError::VotingNotOpen);
+        require!(now < election.closes_at, CommitteeError::VotingClosed);
+
+        let candidate_acc = &mut ctx.accounts.candidate_account;
+        candidate_acc.votes_received = candidate_acc.votes_received
+            .checked_add(vote_weight)
+            .ok_or(CommitteeError::CommitteeOverflow)?;
+
+        election.votes_total = election.votes_total
+            .checked_add(vote_weight)
+            .ok_or(CommitteeError::CommitteeOverflow)?;
+        if candidate_acc.votes_received > election.top_votes {
+            election.top_votes = candidate_acc.votes_received;
+        }
+
+        let ev = &mut ctx.accounts.election_vote;
+        ev.election = election.key();
+        ev.voter = voter_key;
+        ev.candidate = candidate_acc.candidate;
+        ev.vote_weight = vote_weight;
+        ev.cast_at = now;
+        ev.bump = bump_ev;
+
+        emit!(ElectionVoteCast {
+            election_id: election.election_id,
+            voter: voter_key,
+            candidate: candidate_acc.candidate,
+            vote_weight,
+        });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Finalize an election after
+    /// `closes_at`. Caller passes the winning Candidate PDA; we verify its
+    /// votes match `election.top_votes` (so no other candidate can beat it).
+    /// Tie-breaking: WP §15.2 says "candidate with lower ORA stake wins"; in
+    /// Phase 1 we accept the first candidate to reach `top_votes` (off-chain
+    /// indexer is expected to resolve the tie when calling).
+    pub fn finalize_election(ctx: Context<FinalizeElection>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        let election = &mut ctx.accounts.election;
+        require!(!election.finalized, CommitteeError::ElectionAlreadyFinalized);
+        require!(now >= election.closes_at, CommitteeError::VotingNotClosed);
+        require!(election.candidates_count > 0, CommitteeError::ElectionNoCandidates);
+
+        let winning = &ctx.accounts.winning_candidate;
+        require!(
+            winning.votes_received == election.top_votes && winning.votes_received > 0,
+            CommitteeError::MismatchedAccounts
+        );
+
+        let seat = &mut ctx.accounts.committee_seat;
+        require!(seat.committee == election.committee, CommitteeError::MismatchedAccounts);
+        require!(seat.seat_index == election.seat_index, CommitteeError::MismatchedAccounts);
+
+        seat.holder = winning.candidate;
+        seat.elected_at = now;
+        seat.term_ends_at = now
+            .checked_add(TERM_LENGTH_SECS)
+            .ok_or(CommitteeError::CommitteeOverflow)?;
+        seat.recalled = false;
+
+        election.winner = winning.candidate;
+        election.finalized = true;
+
+        emit!(ElectionFinalized {
+            election_id: election.election_id,
+            winner: winning.candidate,
+            votes: winning.votes_received,
+        });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Propose a recall against an
+    /// occupied seat. Initiator must declare ≥ STAKING_MIN_FOR_CANDIDACY.
+    pub fn propose_recall(
+        ctx: Context<ProposeRecall>,
+        declared_stake: u64,
+        reason_uri: String,
+    ) -> Result<()> {
+        // [audit fix R5 H-GE-3] elections_enabled gate on recall proposals
+        // (Sybil-cheap attackers can otherwise spam recall proposals against
+        // any seat). Same Phase-1 deferral pattern as register_candidate.
+        require!(
+            ctx.accounts.governance_config.elections_enabled,
+            CommitteeError::ElectionsDisabled
+        );
+        require!(declared_stake >= STAKING_MIN_FOR_CANDIDACY, CommitteeError::InsufficientInitiatorStake);
+        require!(reason_uri.len() <= RecallProposal::MAX_REASON_URI, CommitteeError::ReasonUriTooLong);
+        let now = Clock::get()?.unix_timestamp;
+        let initiator_key = ctx.accounts.initiator.key();
+        let seat_key = ctx.accounts.committee_seat.key();
+        let bump_r = ctx.bumps.recall_proposal;
+
+        // Cannot recall an empty or already-recalled seat.
+        let seat = &ctx.accounts.committee_seat;
+        require!(seat.holder != Pubkey::default(), CommitteeError::SeatVacant);
+        require!(!seat.recalled, CommitteeError::SeatAlreadyRecalled);
+
+        let reg = &mut ctx.accounts.committee_registry;
+        let id = reg.next_recall_proposal_id;
+        reg.next_recall_proposal_id = id.checked_add(1).ok_or(CommitteeError::CommitteeOverflow)?;
+
+        let p = &mut ctx.accounts.recall_proposal;
+        p.proposal_id = id;
+        p.committee_seat = seat_key;
+        p.initiator = initiator_key;
+        p.opens_at = now;
+        p.closes_at = now.checked_add(RECALL_VOTING_WINDOW_SECS).ok_or(CommitteeError::CommitteeOverflow)?;
+        p.votes_for_recall = 0;
+        p.votes_against = 0;
+        p.finalized = false;
+        p.recall_threshold_bps = RECALL_THRESHOLD_BPS;
+        p.reason_uri = reason_uri;
+        p.bump = bump_r;
+
+        emit!(RecallProposed { proposal_id: id, committee_seat: seat_key, initiator: initiator_key });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Vote on a recall proposal.
+    pub fn vote_recall(
+        ctx: Context<VoteRecall>,
+        support: bool,
+        vote_weight: u64,
+    ) -> Result<()> {
+        // [audit fix R5 H-GE-1] cap vote_weight at MAX_VOTE_WEIGHT.
+        require!(vote_weight > 0, CommitteeError::InvalidVoteWeight);
+        require!(
+            vote_weight <= MAX_VOTE_WEIGHT,
+            CommitteeError::InvalidVoteWeight
+        );
+        let now = Clock::get()?.unix_timestamp;
+        let voter_key = ctx.accounts.voter.key();
+        let bump_rv = ctx.bumps.recall_vote;
+
+        let p = &mut ctx.accounts.recall_proposal;
+        require!(!p.finalized, CommitteeError::RecallAlreadyFinalized);
+        require!(now < p.closes_at, CommitteeError::RecallClosed);
+
+        if support {
+            p.votes_for_recall = p.votes_for_recall.checked_add(vote_weight).ok_or(CommitteeError::CommitteeOverflow)?;
+        } else {
+            p.votes_against = p.votes_against.checked_add(vote_weight).ok_or(CommitteeError::CommitteeOverflow)?;
+        }
+
+        let rv = &mut ctx.accounts.recall_vote;
+        rv.proposal = p.key();
+        rv.voter = voter_key;
+        rv.support = support;
+        rv.vote_weight = vote_weight;
+        rv.cast_at = now;
+        rv.bump = bump_rv;
+
+        emit!(RecallVoteCast { proposal_id: p.proposal_id, voter: voter_key, support, vote_weight });
+        Ok(())
+    }
+
+    /// [whitepaper-sync v1.1] §15 elections — Finalize a recall. If
+    /// for/total ≥ RECALL_THRESHOLD_BPS, flip `committee_seat.recalled = true`.
+    pub fn finalize_recall(ctx: Context<FinalizeRecall>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        let p = &mut ctx.accounts.recall_proposal;
+        require!(!p.finalized, CommitteeError::RecallAlreadyFinalized);
+        require!(now >= p.closes_at, CommitteeError::RecallNotClosed);
+
+        let total = p.votes_for_recall.checked_add(p.votes_against).ok_or(CommitteeError::CommitteeOverflow)?;
+        let recall_passed = if total == 0 {
+            false
+        } else {
+            let for_bps = (p.votes_for_recall as u128)
+                .checked_mul(10_000)
+                .ok_or(CommitteeError::CommitteeOverflow)?
+                .checked_div(total as u128)
+                .ok_or(CommitteeError::CommitteeOverflow)? as u16;
+            for_bps >= p.recall_threshold_bps
+        };
+
+        if recall_passed {
+            let seat = &mut ctx.accounts.committee_seat;
+            seat.recalled = true;
+            // NOTE: holder field is preserved as a historical record; future
+            // `open_election` on this seat re-fills it. seat.term_ends_at is
+            // not zeroed — indexers can still read "the seat was held by X
+            // until recalled at now".
+        }
+
+        p.finalized = true;
+        emit!(RecallFinalized {
+            proposal_id: p.proposal_id,
+            recalled: recall_passed,
+            votes_for: p.votes_for_recall,
+            votes_against: p.votes_against,
+        });
+        Ok(())
+    }
+
     pub fn dissolve_panel_for_absence(ctx: Context<DissolvePanelCtx>, dispute_id: u64) -> Result<()> {
         // [audit fix round2 R2-H-G1] gate absence-slashing on arbitration_enabled
         // so honest jurors are not penalised when the gate was flipped mid-flow.
@@ -503,6 +974,7 @@ pub mod aura_governance {
 
 // === Account Structures ===
 // [audit fix C-21/C-22] add ora_mint + quorum to GovernanceConfig
+// [whitepaper-sync v1.1] §15 elections — `elections_enabled` flag added (Phase 1: false).
 #[account]
 pub struct GovernanceConfig {
     pub admin: Pubkey,             // 32
@@ -510,16 +982,35 @@ pub struct GovernanceConfig {
     pub ora_mint: Pubkey,          // 32 — voters' ORA token accounts must match this mint
     pub quorum: u64,               // 8 — minimum total_votes weight required to execute
     pub arbitration_enabled: bool, // 1 — [audit fix C-G2] gate flag
+    pub elections_enabled: bool,   // 1 — [whitepaper-sync v1.1] §15 elections — Phase 1 gate
     pub bump: u8,                  // 1
 }
 #[account] pub struct ArbiterRecord { pub arbiter: Pubkey, pub registered_at: i64, pub is_active: bool, pub bump: u8 }
-#[account] pub struct Proposal { pub proposal_id: u64, pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
+// [whitepaper-sync v1.1] Added `tier: ProposalTier` field per Handbook §14 +
+// WP §15/§19 four-tier governance system. Stored alongside the existing
+// committee_type/proposal_type metadata so `execute_proposal` can pick the
+// correct supermajority threshold.
+#[account] pub struct Proposal { pub proposal_id: u64, pub proposer: Pubkey, pub title: String, pub description: String, pub committee_type: CommitteeType, pub proposal_type: ProposalType, pub tier: ProposalTier, pub status: ProposalStatus, pub votes_for: u64, pub votes_against: u64, pub total_votes: u64, pub created_at: i64, pub voting_ends_at: i64, pub bump: u8 }
 #[account] pub struct VoteRecord { pub voter: Pubkey, pub proposal: Pubkey, pub vote_for: bool, pub vote_weight: u64, pub voted_at: i64, pub bump: u8 }
 #[account] pub struct Dispute { pub plaintiff: Pubkey, pub target_user: Pubkey, pub evidence_uri: String, pub dispute_type: DisputeType, pub status: OldDisputeStatus, pub votes_guilty: u8, pub votes_innocent: u8, pub created_at: i64, pub bump: u8 }
 #[account] pub struct DisputeVote { pub arbiter: Pubkey, pub dispute: Pubkey, pub vote_guilty: bool, pub voted_at: i64, pub bump: u8 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum CommitteeType { Development, Content, Operations, Arbitration, Technical }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ProposalType { PolicyChange, BudgetAllocation, PartnershipApproval, CodeUpgrade, Other }
+/// [whitepaper-sync v1.1] Governance tier per Handbook §14 + WP §19.
+/// - **TierI** (Constitutional, immutable): cannot be modified through normal
+///   on-chain process; `create_proposal` rejects them. Off-chain
+///   Constitutional Amendment Process required (95% + all 5 committees + 1yr).
+/// - **TierII** (Supermajority): 75% approval + all 5 committees + 90-day
+///   implementation. The contract enforces the 75% yes-bps threshold; the
+///   five-committee sign-off is off-chain (no on-chain committee-seat
+///   machinery exists yet — see TODO at top of file).
+/// - **TierIII** (Standard): strict 50% majority.
+/// - **TierIV** (Committee-internal): committees rule directly; on-chain
+///   threshold treated as 50% for the rare case a Tier IV proposal flows
+///   through this contract, but typical Tier IV ops bypass `create_proposal`
+///   entirely.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ProposalTier { TierI, TierII, TierIII, TierIV }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum ProposalStatus { UnderReview, Voting, Passed, Failed, Executed }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum DisputeType { Copyright, Scam, Harassment, Other }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)] pub enum OldDisputeStatus { UnderReview, Guilty, Innocent }
@@ -527,7 +1018,8 @@ pub struct GovernanceConfig {
 // === Contexts ===
 #[derive(Accounts)] pub struct InitializeGovernance<'info> {
     // [audit fix C-21/C-22 + C-G2] expanded space for ora_mint + quorum + arbitration_enabled
-    #[account(init, payer = admin, space = 8+32+8+32+8+1+1, seeds = [b"governance_config"], bump)]
+    // [whitepaper-sync v1.1] §15 elections — +1 byte for `elections_enabled` flag.
+    #[account(init, payer = admin, space = 8+32+8+32+8+1+1+1, seeds = [b"governance_config"], bump)]
     pub governance_config: Account<'info, GovernanceConfig>,
     // [audit fix C-G1] caller MUST equal hardcoded PROGRAM_ADMIN.
     #[account(mut, address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
@@ -585,8 +1077,10 @@ pub struct GovernanceConfig {
     // BEFORE the function body increments it. So a fresh proposal uses the
     // current counter value as its id, and the next call sees the incremented
     // value.
+    // [whitepaper-sync v1.1] +1 byte for the new `tier` field on Proposal
+    // (ProposalTier is a 4-variant enum → 1-byte discriminant).
     #[account(init, payer = proposer,
-        space = 8+8+32+104+5004+1+1+1+8+8+8+8+8+1,
+        space = 8+8+32+104+5004+1+1+1+1+8+8+8+8+8+1,
         seeds = [b"proposal", governance_config.proposal_count.to_le_bytes().as_ref()],
         bump)]
     pub proposal: Account<'info, Proposal>,
@@ -790,4 +1284,7 @@ pub enum ErrorCode {
     #[msg("Overflow")] Overflow,
     #[msg("Quorum not reached")] QuorumNotReached,
     #[msg("Legacy dispute voter cap reached")] DisputeVoterCapReached,
+    // [whitepaper-sync v1.1] Tier I parameters are constitutional/immutable;
+    // the on-chain proposal pipeline rejects them.
+    #[msg("Tier I parameters are immutable; use the off-chain Constitutional Amendment Process")] TierIImmutable,
 }

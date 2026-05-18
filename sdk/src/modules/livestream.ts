@@ -32,10 +32,15 @@ export const LIVESTREAM_SEEDS = {
   TIP_BOOST: Buffer.from('tip_boost'),
 } as const;
 
+// [whitepaper-sync v1.1] Fee split per Whitepaper v1.1 §5.7 + Numbers
+// Handbook §5: 5% total = 2% burn + 2% staking + 0.5% gas + 0.5% ops
+// (40/40/10/10 of the 5% fee). Previous values were BURN=250 / STAKING=200
+// / PLATFORM=50 (2.5/2/0.5 3-way split that omitted the gas-reserve leg).
 export const LIVESTREAM_FEE_BPS = {
-  BURN: 250,
+  BURN: 200,
   STAKING: 200,
-  PLATFORM: 50,
+  GAS: 50,
+  OPS: 50,
   TOTAL: 500,
 } as const;
 

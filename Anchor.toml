@@ -13,6 +13,8 @@ aura_social_graph = "GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN"
 aura_content_license = "9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE"
 aura_reputation = "GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg"
 aura_fractionalize = "3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S"
+# [whitepaper-sync v1.1] §5.6 launch-incentives
+aura_launch_incentives = "GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf"
 
 [registry]
 url = "https://api.apr.dev"

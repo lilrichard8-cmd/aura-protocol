@@ -24,13 +24,16 @@ describe('aura-sdk LivestreamModule', () => {
     it('STREAM seed defined', () => assert.equal(LIVESTREAM_SEEDS.STREAM.toString(), 'stream'));
     it('TIP seed defined', () => assert.equal(LIVESTREAM_SEEDS.TIP.toString(), 'tip'));
 
-    it('tip fee sums to 5% (500 bps): 2.5 burn + 2 staking + 0.5 platform', () => {
-      const { BURN, STAKING, PLATFORM, TOTAL } = LIVESTREAM_FEE_BPS as any;
-      // Allow either explicit TOTAL or compute from components
+    it('tip fee sums to 5% (500 bps): 2 burn + 2 staking + 0.5 gas + 0.5 ops [whitepaper-sync v1.1]', () => {
+      const { BURN, STAKING, GAS, OPS, PLATFORM, TOTAL } = LIVESTREAM_FEE_BPS as any;
+      // Allow either explicit TOTAL or compute from components. Accept the
+      // new 4-way (BURN/STAKING/GAS/OPS) split or the legacy 3-way
+      // (BURN/STAKING/PLATFORM) shape during SDK migration.
       if (TOTAL !== undefined) {
         assert.equal(TOTAL, 500);
       } else {
-        const sum = (BURN ?? 0) + (STAKING ?? 0) + (PLATFORM ?? 0);
+        const sum =
+          (BURN ?? 0) + (STAKING ?? 0) + (GAS ?? 0) + (OPS ?? 0) + (PLATFORM ?? 0);
         assert.isAbove(sum, 0);
       }
     });

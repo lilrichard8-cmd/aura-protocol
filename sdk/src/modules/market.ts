@@ -659,3 +659,251 @@ export function computeWinnerNet(gross: bigint): bigint {
   const fee = (gross * BigInt(BOUNTY_V2_FEE_BPS.TOTAL)) / 10_000n;
   return gross - fee;
 }
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  [whitepaper-sync v1.1] §12 NFT Royalty enforcement                  ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+//
+// Mirrors `programs/market/src/royalty.rs`. WP §12.1 specifies:
+//   • min royalty 5% (500 bps)
+//   • max royalty 45% (4500 bps)
+//   • default royalty 5% (500 bps)
+//   • protocol fee 5% (500 bps) on top — split 40/40/10/10 per §5.7.
+
+export const NFT_ROYALTY_SEEDS = {
+  CONFIG: Buffer.from('nft-royalty'),
+} as const;
+
+export const NFT_ROYALTY_BPS = {
+  MIN: 500,
+  MAX: 4500,
+  DEFAULT: 500,
+} as const;
+
+/** Protocol fee bps on NFT secondary sales — same as CC / bounty paths. */
+export const NFT_PROTOCOL_FEE_BPS = {
+  TOTAL: 500,
+  BURN: 200,
+  STAKING: 200,
+  GAS: 50,
+  OPS: 50,
+} as const;
+
+/** Maximum combined deduction (royalty + protocol fee). Tops out at 50%. */
+export const NFT_MAX_TOTAL_DEDUCTION_BPS = NFT_ROYALTY_BPS.MAX + NFT_PROTOCOL_FEE_BPS.TOTAL;
+
+export interface NftSaleSplit {
+  royalty: bigint;
+  feeTotal: bigint;
+  burn: bigint;
+  staking: bigint;
+  gas: bigint;
+  ops: bigint;
+  sellerNet: bigint;
+}
+
+/**
+ * Compute the WP §12 split client-side. Mirrors `royalty::compute_nft_sale_split`
+ * in the on-chain program. Useful for UIs that want to preview the
+ * royalty + fee breakdown before the buyer signs the transaction.
+ */
+export function computeNftSaleSplit(salePrice: bigint, royaltyBps: number): NftSaleSplit {
+  if (royaltyBps < NFT_ROYALTY_BPS.MIN || royaltyBps > NFT_ROYALTY_BPS.MAX) {
+    throw new Error(
+      `royaltyBps ${royaltyBps} out of range [${NFT_ROYALTY_BPS.MIN}, ${NFT_ROYALTY_BPS.MAX}]`
+    );
+  }
+  const bps = BigInt(royaltyBps);
+  const royalty = (salePrice * bps) / 10_000n;
+  const feeTotal = (salePrice * BigInt(NFT_PROTOCOL_FEE_BPS.TOTAL)) / 10_000n;
+  const burn = (salePrice * BigInt(NFT_PROTOCOL_FEE_BPS.BURN)) / 10_000n;
+  const staking = (salePrice * BigInt(NFT_PROTOCOL_FEE_BPS.STAKING)) / 10_000n;
+  const gas = (salePrice * BigInt(NFT_PROTOCOL_FEE_BPS.GAS)) / 10_000n;
+  // Ops absorbs rounding residue — mirrors on-chain saturating_sub chain.
+  const ops = feeTotal - burn - staking - gas;
+  const sellerNet = salePrice - royalty - feeTotal;
+  if (sellerNet < 0n) {
+    throw new Error('Royalty + fee exceeded sale price');
+  }
+  return { royalty, feeTotal, burn, staking, gas, ops, sellerNet };
+}
+
+export interface NftRoyaltyConfigOnChain {
+  address: PublicKey;
+  nftMint: PublicKey;
+  originalCreator: PublicKey;
+  royaltyBps: number;
+  createdAt: number;
+  totalRoyaltiesPaid: bigint;
+  saleCount: bigint;
+  bump: number;
+}
+
+const NFT_ROYALTY_CONFIG_DISC = accountDiscriminator('NftRoyaltyConfig');
+
+function parseNftRoyaltyConfig(addr: PublicKey, data: Buffer): NftRoyaltyConfigOnChain {
+  if (!data.slice(0, 8).equals(NFT_ROYALTY_CONFIG_DISC)) {
+    throw new Error('Account is not a NftRoyaltyConfig');
+  }
+  let o = 8;
+  const nftMint = new PublicKey(data.slice(o, o + 32)); o += 32;
+  const originalCreator = new PublicKey(data.slice(o, o + 32)); o += 32;
+  const royaltyBps = data.readUInt16LE(o); o += 2;
+  const createdAt = Number(data.readBigInt64LE(o)); o += 8;
+  const totalRoyaltiesPaid = data.readBigUInt64LE(o); o += 8;
+  const saleCount = data.readBigUInt64LE(o); o += 8;
+  const bump = data.readUInt8(o); o += 1;
+  return {
+    address: addr,
+    nftMint,
+    originalCreator,
+    royaltyBps,
+    createdAt,
+    totalRoyaltiesPaid,
+    saleCount,
+    bump,
+  };
+}
+
+/** Derive the NftRoyaltyConfig PDA for an NFT mint. */
+export function deriveNftRoyaltyConfig(
+  programId: PublicKey,
+  nftMint: PublicKey
+): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [NFT_ROYALTY_SEEDS.CONFIG, nftMint.toBuffer()],
+    programId
+  );
+  return pda;
+}
+
+export interface SetRoyaltyParams {
+  nftMint: PublicKey;
+  /** Basis points; must be in [NFT_ROYALTY_BPS.MIN, NFT_ROYALTY_BPS.MAX]. */
+  royaltyBps: number;
+}
+
+export interface EnforceRoyaltyParams {
+  nftMint: PublicKey;
+  salePrice: bigint | number;
+  seller: PublicKey;
+  /** Optional override; defaults to seller's ATA(ORA). */
+  sellerOraAccount?: PublicKey;
+  /** Optional override; defaults to buyer's (wallet) ATA(ORA). */
+  buyerOraAccount?: PublicKey;
+  /** Optional override; defaults to ATA(originalCreator, ORA). When omitted,
+   *  the SDK fetches the on-chain royalty config to discover the creator. */
+  creatorOraAccount?: PublicKey;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// MarketModule — NFT royalty extensions
+// ────────────────────────────────────────────────────────────────────────
+
+declare module './market' {
+  interface MarketModule {
+    setRoyalty(params: SetRoyaltyParams): Promise<TransactionResult>;
+    enforceRoyalty(params: EnforceRoyaltyParams): Promise<TransactionResult>;
+    fetchNftRoyaltyConfig(nftMint: PublicKey): Promise<NftRoyaltyConfigOnChain | null>;
+  }
+}
+
+MarketModule.prototype.setRoyalty = async function (
+  this: MarketModule,
+  params: SetRoyaltyParams
+): Promise<TransactionResult> {
+  const creator = (this as any).requireWallet() as PublicKey;
+  if (
+    params.royaltyBps < NFT_ROYALTY_BPS.MIN ||
+    params.royaltyBps > NFT_ROYALTY_BPS.MAX
+  ) {
+    return errRes(
+      `royaltyBps must be within [${NFT_ROYALTY_BPS.MIN}, ${NFT_ROYALTY_BPS.MAX}]`
+    );
+  }
+  const programId = (this as any).programId as PublicKey;
+  const royaltyConfig = deriveNftRoyaltyConfig(programId, params.nftMint);
+
+  const u16LE = (v: number) => {
+    const b = Buffer.alloc(2);
+    b.writeUInt16LE(v, 0);
+    return b;
+  };
+
+  const data = Buffer.concat([
+    ixDiscriminator('set_royalty'),
+    u16LE(params.royaltyBps),
+  ]);
+
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: royaltyConfig, isSigner: false, isWritable: true },
+      { pubkey: params.nftMint, isSigner: false, isWritable: false },
+      { pubkey: creator, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  return (this as any).sendTx([ix]);
+};
+
+MarketModule.prototype.fetchNftRoyaltyConfig = async function (
+  this: MarketModule,
+  nftMint: PublicKey
+): Promise<NftRoyaltyConfigOnChain | null> {
+  const programId = (this as any).programId as PublicKey;
+  const pda = deriveNftRoyaltyConfig(programId, nftMint);
+  const acc = await (this as any).connection.getAccountInfo(pda);
+  if (!acc) return null;
+  return parseNftRoyaltyConfig(pda, acc.data);
+};
+
+MarketModule.prototype.enforceRoyalty = async function (
+  this: MarketModule,
+  params: EnforceRoyaltyParams
+): Promise<TransactionResult> {
+  const buyer = (this as any).requireWallet() as PublicKey;
+  const cfg = (this as any).cfg as MarketModuleConfig;
+  const programId = (this as any).programId as PublicKey;
+
+  const royaltyConfig = deriveNftRoyaltyConfig(programId, params.nftMint);
+
+  // Resolve creator ATA (requires fetching config when override absent).
+  let creatorOraAccount = params.creatorOraAccount;
+  if (!creatorOraAccount) {
+    const onchain = await this.fetchNftRoyaltyConfig(params.nftMint);
+    if (!onchain) return errRes('NftRoyaltyConfig not found — creator must call setRoyalty first');
+    creatorOraAccount = await getAssociatedTokenAddress(cfg.oraMint, onchain.originalCreator);
+  }
+
+  const sellerOraAccount =
+    params.sellerOraAccount ?? (await getAssociatedTokenAddress(cfg.oraMint, params.seller));
+  const buyerOraAccount =
+    params.buyerOraAccount ?? (await getAssociatedTokenAddress(cfg.oraMint, buyer));
+
+  const data = Buffer.concat([
+    ixDiscriminator('enforce_royalty_on_sale'),
+    u64LE(BigInt(params.salePrice)),
+  ]);
+
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: royaltyConfig, isSigner: false, isWritable: true },
+      { pubkey: params.nftMint, isSigner: false, isWritable: false },
+      { pubkey: cfg.oraMint, isSigner: false, isWritable: false },
+      { pubkey: buyerOraAccount, isSigner: false, isWritable: true },
+      { pubkey: sellerOraAccount, isSigner: false, isWritable: true },
+      { pubkey: creatorOraAccount, isSigner: false, isWritable: true },
+      { pubkey: cfg.stakingRewardsPool, isSigner: false, isWritable: true },
+      { pubkey: cfg.gasReservePool, isSigner: false, isWritable: true },
+      { pubkey: cfg.opsTreasuryPool, isSigner: false, isWritable: true },
+      { pubkey: params.seller, isSigner: true, isWritable: false },
+      { pubkey: buyer, isSigner: true, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  return (this as any).sendTx([ix]);
+};

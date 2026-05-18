@@ -3,6 +3,23 @@ use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount, Transfer}
 
 declare_id!("3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S");
 
+// ============================================================================
+// [whitepaper-sync v1.1] verified — NFT royalty range (5%-45%) per WP §12 is
+// enforced OUTSIDE this program by Metaplex Programmable NFTs (pNFTs) at the
+// token-program level. This program handles **fractionalization**
+// (NFT → fragment tokens), not royalty assessment. The 5% standard
+// transaction fee on AURA secondary NFT sales is collected by the `market`
+// program; pNFT royalty (5% min / 5% default / 45% max) is enforced by
+// Metaplex's `mpl-token-metadata` program. No royalty bps field belongs in
+// this contract.
+//
+// Whitepaper v1.1 §12 parameters (informational only — enforced externally):
+//   - Minimum royalty: 5%
+//   - Default royalty: 5%
+//   - Maximum royalty: 45%
+//   - Enforcement: Metaplex pNFT (on-chain, non-bypassable)
+// ============================================================================
+
 // ─── Hardcoded program constants ─────────────────────────────────────────────
 // [audit fix C-F5] PROGRAM_ADMIN is the only signer permitted to push revenue
 // into the protocol-wide revenue distribution path (`distribute_revenue`).

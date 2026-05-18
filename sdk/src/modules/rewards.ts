@@ -56,6 +56,18 @@ export const INCENTIVE_TAX_BPS = 1_000;
 /** MAU threshold where base reward steps from 2 → 1 ORA. */
 export const MAU_THRESHOLD = 500_000n;
 
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.6 Launch incentive sub-pool tracking constants.
+//   Million Plan          50M
+//   Creator Onboarding    50M
+//   Rising Star Plan      50M
+// Total = 150M (= ORA_ALLOCATION_LAUNCH_INCENTIVES in sdk/modules/ora.ts).
+// ──────────────────────────────────────────────────────────────────────
+export const LAUNCH_INCENTIVE_MILLION_PLAN_POOL: bigint = 50_000_000n * 1_000_000_000n;
+export const LAUNCH_INCENTIVE_ONBOARDING_POOL: bigint = 50_000_000n * 1_000_000_000n;
+export const LAUNCH_INCENTIVE_RISING_STAR_POOL: bigint = 50_000_000n * 1_000_000_000n;
+export const LAUNCH_INCENTIVE_TOTAL: bigint = 150_000_000n * 1_000_000_000n;
+
 export enum ContentTier {
   Basic = 0,         // 1.0x
   Standard = 1,      // 1.5x

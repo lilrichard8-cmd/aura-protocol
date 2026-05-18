@@ -65,11 +65,50 @@ export function deriveRewardStatePda(rewardsProgramId: PublicKey): PublicKey {
 }
 
 export const ORA_DECIMALS = 9;
-export const ORA_INITIAL_SUPPLY: bigint = 1_050_000_000n * 1_000_000_000n; // 1.05B * 10^9
-export const ORA_MAU_GROWTH_MINT_PER_10K: bigint = 500_000n * 1_000_000_000n;
+// [whitepaper-sync v1.1] synced to Whitepaper v1.1 §5.2 / Numbers Handbook §1.
+export const ORA_INITIAL_SUPPLY: bigint = 1_100_000_000n * 1_000_000_000n; // 1.1B * 10^9
+// [whitepaper-sync v1.1] synced to Whitepaper v1.1 §5.10 / Handbook §3.
+export const ORA_MAU_GROWTH_MINT_PER_10K: bigint = 100_000n * 1_000_000_000n;
 export const ORA_MAU_GROWTH_MINT_CAP: bigint = 75_000_000n * 1_000_000_000n;
-/** Burn floor: stop burning when circulating supply < 30% of initial (315M). */
-export const ORA_BURN_FLOOR: bigint = 315_000_000n * 1_000_000_000n;
+/** Burn floor: stop burning when circulating supply < 30% of initial (330M). */
+// [whitepaper-sync v1.1] rescaled to 30% of 1.1B = 330M.
+export const ORA_BURN_FLOOR: bigint = 330_000_000n * 1_000_000_000n;
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.2 Initial Supply Allocation (1.1B)
+// ──────────────────────────────────────────────────────────────────────
+export const ORA_ALLOCATION_TEAM: bigint = 150_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_TEAM_SOREN: bigint = 50_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_TEAM_IRIS: bigint = 30_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_TEAM_FUTURE: bigint = 70_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_COMMUNITY: bigint = 500_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_ECOSYSTEM: bigint = 200_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_LAUNCH_INCENTIVES: bigint = 150_000_000n * 1_000_000_000n;
+export const ORA_ALLOCATION_LIQUIDITY: bigint = 100_000_000n * 1_000_000_000n;
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.5 Management Performance Pool
+// ──────────────────────────────────────────────────────────────────────
+export const ORA_PERF_POOL_ANNUAL_BUDGET: bigint = 30_000_000n * 1_000_000_000n;
+export const ORA_PERF_POOL_MAX_YEARS = 3;
+export const ORA_PERF_POOL_MAX_TOTAL: bigint = 90_000_000n * 1_000_000_000n;
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.8 Perpetual annual emission schedule
+// ──────────────────────────────────────────────────────────────────────
+export const ORA_ANNUAL_EMISSION_Y1_BPS = 500;   // 5%
+export const ORA_ANNUAL_EMISSION_Y2_BPS = 400;   // 4%
+export const ORA_ANNUAL_EMISSION_Y3_BPS = 300;   // 3%
+export const ORA_ANNUAL_EMISSION_FLOOR_BPS = 200; // Y4+ permanent floor 2%
+export const ORA_ANNUAL_EMISSION_CREATOR_SHARE_BPS = 8000; // 80%
+export const ORA_ANNUAL_EMISSION_DAO_SHARE_BPS = 2000;     // 20%
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §3 Storage emission framework + Y1 emergency authority
+// ──────────────────────────────────────────────────────────────────────
+export const ORA_STORAGE_EMISSION_TRIGGER_CAP_BPS = 300; // 3% per trigger
+export const ORA_Y1_EMERGENCY_AUTHORITY_BPS = 100;       // 1% Y1 single mint
+export const ORA_SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
 
 /** BurnType enum — value indices must match Rust enum declaration order. */
 export enum BurnType {

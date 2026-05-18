@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8");
 
@@ -9,6 +9,19 @@ declare_id!("D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8");
 pub const POOL_INITIALIZER: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const POOL_DEPOSITOR: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [whitepaper-sync v1.1] Hardcoded ORA mint required for the per-curation
+/// 1 ORA cost gate and the 100-ORA sybil-holding floor introduced by
+/// Handbook §10. Placeholder = System Program ID until mainnet wiring.
+/// PRE-MAINNET TODO: replace with the canonical aura_ora SPL mint.
+pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [whitepaper-sync v1.1] Hardcoded ORA sink token account that receives the
+/// 1-ORA-per-curation cost (Handbook §10 anti-sybil). At mainnet this should
+/// be the protocol curator-reward pool ATA (the same account that funds the
+/// 10,000 ORA / day Curator Reward Pool) so per-curation costs cycle directly
+/// back into curator rewards. Placeholder = System Program ID until wired.
+pub const CURATION_FEE_SINK: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 // [audit fix round2 C2.C-2] Hardcoded core-program ID used to validate that
 // `content` AccountInfos passed in are actual `Post` accounts owned by the
@@ -24,19 +37,59 @@ pub const AURA_CORE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     67, 172, 164, 42, 73, 138, 152, 181, 220, 26, 81, 60, 26, 27, 110, 151,
 ]);
 
+// ─── Whitepaper §10 / Handbook §10 constants ────────────────────────────
+// [whitepaper-sync v1.1] Replaces the previous time-decay model
+// (10x / 5x / 2x / 1x / 0.1x at 1h / 6h / 24h / 72h / 72h+) with the
+// canonical Handbook §10 two-factor model: discovery weight × curator-rank
+// weight. All weights are scaled by `WEIGHT_SCALE = 100` so we can keep
+// integer arithmetic and represent fractional multipliers like 1.5×.
+//
+//  Curation Score = follower_multiplier × curator_rank_multiplier
+//  Theoretical max combined:  5 × 5 = 25× (1st curator on <100-follower creator)
+//  Theoretical min:           0.5×        (501st+ on >100K-follower creator,
+//                                          per Handbook §10 — "0.5×" is the
+//                                          published floor; combined math
+//                                          actually yields 0.25× but
+//                                          Handbook wins per audit memo)
+
+pub const WEIGHT_SCALE: u64 = 100;
+
+/// Per-curation cost (Handbook §10 — anti-sybil). 1 ORA = 1 * 10^9 base units.
+/// Charged in ORA SPL tokens, transferred from the curator's ATA to
+/// `CURATION_FEE_SINK`. Tier-III adjustable per WP §19.5.
+pub const PER_CURATION_COST_RAW: u64 = 1_000_000_000;
+
+/// Minimum ORA balance a wallet must hold to curate (Handbook §10 sybil
+/// threshold = 100 ORA). Checked against the curator's ATA balance at
+/// `curate` time. Tier-II per WP §19.4.
+pub const MIN_CURATOR_HOLDING_RAW: u64 = 100 * 1_000_000_000;
+
+/// Daily reward-pool sizes (documented for indexers / off-chain settlement
+/// driver — these are NOT enforced by this program because the curation
+/// reward pool is funded externally via `deposit_to_pool`. Handbook §10).
+pub const CURATOR_DAILY_POOL_ORA: u64 = 10_000 * 1_000_000_000;
+pub const CREATOR_DAILY_POOL_ORA: u64 = 10_000 * 1_000_000_000;
+
 #[program]
 pub mod aura_curation {
     use super::*;
 
-    /// Initialize a curation pool for a content
-    /// [audit fix C-H1] gated to POOL_INITIALIZER
-    /// [audit fix C-2] also initializes the reward_vault as a program-owned PDA
-    /// [audit fix round2 C2.C-2] `content` is now UncheckedAccount + manual
-    /// deserialization. Anchor's automatic Account<Post> owner check rejected
-    /// the real core-owned Post and bricked this instruction; we now do the
-    /// owner + discriminator + decode work ourselves so the program-owned
-    /// CurationPool can read content.created_at from the canonical core Post.
-    pub fn initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
+    /// Initialize a curation pool for a content.
+    ///
+    /// [whitepaper-sync v1.1] now takes `creator_follower_count` so the pool
+    /// can pre-compute the canonical Handbook §10 "Discovery Weight" tier
+    /// once at init time (instead of the previous time-since-publish model).
+    /// The follower count is captured at pool-init time and intentionally
+    /// frozen for the life of the pool — this is the "burst at publish" the
+    /// Handbook §10 model rewards.
+    ///
+    /// [audit fix C-H1] gated to POOL_INITIALIZER.
+    /// [audit fix C-2] also initializes the reward_vault as a program-owned PDA.
+    /// [audit fix round2 C2.C-2] `content` is UncheckedAccount + manual decode.
+    pub fn initialize_pool(
+        ctx: Context<InitializePool>,
+        creator_follower_count: u64,
+    ) -> Result<()> {
         // [audit fix round2 C2.C-2] manually decode the core-owned Post
         let content_info = &ctx.accounts.content;
         let core_post = decode_core_post(content_info)?;
@@ -51,21 +104,31 @@ pub mod aura_curation {
         pool.bump = ctx.bumps.curation_pool;
         // [audit fix round2 C2.M-1] settle_total_pool is set during settle_pool
         pool.settle_total_pool = 0;
+        // [whitepaper-sync v1.1] follower count drives the discovery-weight tier
+        pool.creator_follower_count = creator_follower_count;
+        pool.creator_author = core_post.author;
 
-        msg!("Curation pool initialized for content: {}", pool.content_id);
+        msg!(
+            "Curation pool initialized for content: {} (creator followers: {})",
+            pool.content_id,
+            creator_follower_count
+        );
         Ok(())
     }
 
-    /// Curate content (record discovery time + curation weight)
-    /// [audit fix C-H2] disallow self-curation (author cannot curate own content)
-    /// [audit fix C-H3] removed cross-program mutation of `content.likes` —
-    /// this program does NOT own the Post struct; the core program does. Anchor
-    /// deserialization of a core-owned Post under the curation program ID would
-    /// fail in any case. Off-chain indexers should aggregate likes from
-    /// CurationRecord events.
-    /// [audit fix round2 C2.C-2] `content` is now UncheckedAccount + manual
-    /// deserialization. Self-curation check (C2.H-2 / C-H2) is re-implemented
-    /// here against the manually decoded author field.
+    /// Curate content.
+    ///
+    /// [whitepaper-sync v1.1] **Replaces the time-decay model with the
+    /// Handbook §10 two-factor model**:
+    ///   Curation Score = Discovery Weight (by follower count)
+    ///                  × Curator Rank Weight (order of curation)
+    /// Also enforces:
+    ///   - Per-curation cost of 1 ORA (transferred to CURATION_FEE_SINK)
+    ///   - Sybil floor: curator's ORA ATA balance ≥ 100 ORA
+    ///
+    /// [audit fix C-H2] disallow self-curation
+    /// [audit fix C-H3] no cross-program mutation of `content.likes`
+    /// [audit fix round2 C2.C-2] `content` is UncheckedAccount + manual decode
     pub fn curate(ctx: Context<Curate>) -> Result<()> {
         let clock = Clock::get()?;
 
@@ -74,8 +137,7 @@ pub mod aura_curation {
 
         require!(!pool.is_settled, ErrorCode::PoolAlreadySettled);
 
-        // [audit fix round2 C2.C-2 + C2.H-2] manually decode the core-owned Post
-        // and re-check self-curation against the decoded author.
+        // [audit fix round2 C2.C-2 + C2.H-2] decode core-owned Post + self-curation check
         let content_info = &ctx.accounts.content;
         let core_post = decode_core_post(content_info)?;
         require!(
@@ -83,19 +145,66 @@ pub mod aura_curation {
             ErrorCode::SelfCurationForbidden
         );
 
-        // Calculate time delta since content publication
-        let time_delta_seconds = clock.unix_timestamp - pool.content_publish_time;
-        require!(time_delta_seconds >= 0, ErrorCode::InvalidTimeDelta);
+        // [whitepaper-sync v1.1] enforce 100-ORA sybil holding floor
+        let curator_token = &ctx.accounts.curator_ora_account;
+        require!(
+            curator_token.mint == ORA_MINT,
+            ErrorCode::InvalidOraMint
+        );
+        require!(
+            curator_token.owner == ctx.accounts.curator.key(),
+            ErrorCode::InvalidOraOwner
+        );
+        require!(
+            curator_token.amount >= MIN_CURATOR_HOLDING_RAW,
+            ErrorCode::BelowSybilThreshold
+        );
 
-        // Calculate curation weight based on time decay
-        let curation_weight = calculate_time_decay_weight(time_delta_seconds)?;
+        // [whitepaper-sync v1.1] charge 1 ORA per curation (anti-sybil).
+        // Transferred to CURATION_FEE_SINK (typically the curator-reward
+        // pool ATA so costs recycle into rewards).
+        let fee_sink = &ctx.accounts.curation_fee_sink;
+        require!(
+            fee_sink.key() == CURATION_FEE_SINK,
+            ErrorCode::InvalidFeeSink
+        );
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: curator_token.to_account_info(),
+                    to: fee_sink.to_account_info(),
+                    authority: ctx.accounts.curator.to_account_info(),
+                },
+            ),
+            PER_CURATION_COST_RAW,
+        )?;
+
+        // [whitepaper-sync v1.1] curator rank = 1-indexed position in this pool
+        let curator_rank = pool
+            .curators_count
+            .checked_add(1)
+            .ok_or(ErrorCode::Overflow)?;
+
+        // Compute Handbook §10 weight = discovery × curator-rank (× WEIGHT_SCALE^2 / WEIGHT_SCALE)
+        let discovery_w = discovery_weight(pool.creator_follower_count);
+        let rank_w = curator_rank_weight(curator_rank);
+        // weight = discovery_w * rank_w / WEIGHT_SCALE  (one descale; the
+        // remaining factor of 100 is the on-chain integer precision).
+        let curation_weight = (discovery_w as u128)
+            .checked_mul(rank_w as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(WEIGHT_SCALE as u128)
+            .ok_or(ErrorCode::Overflow)? as u64;
+        require!(curation_weight > 0, ErrorCode::ZeroWeight);
 
         // Update curation record
         record.curator = ctx.accounts.curator.key();
         record.content_id = content_info.key();
         record.curated_at = clock.unix_timestamp;
         record.content_publish_time = pool.content_publish_time;
-        record.time_delta_seconds = time_delta_seconds;
+        // [whitepaper-sync v1.1] field repurposed: stores curator rank (was time_delta)
+        record.curator_rank = curator_rank;
         record.curation_weight = curation_weight;
         record.reward_claimed = 0;
         record.bump = ctx.bumps.curation_record;
@@ -105,47 +214,56 @@ pub mod aura_curation {
             .total_weight
             .checked_add(curation_weight)
             .ok_or(ErrorCode::Overflow)?;
-        pool.curators_count = pool
-            .curators_count
-            .checked_add(1)
-            .ok_or(ErrorCode::Overflow)?;
-
-        // [audit fix C-H3] DO NOT mutate content.likes here — Post is owned by
-        // the core program; cross-program writes are not allowed via plain
-        // Account<...> deserialization and would either fail at runtime or
-        // corrupt state on a forked client. Aggregation is now an off-chain
-        // concern keyed on the CurationRecord PDA.
+        pool.curators_count = curator_rank;
 
         msg!(
-            "Content curated by {} with weight {} (time delta: {}s)",
+            "Curated by {} rank #{} (discovery {}× rank {}× / scaled {})",
             record.curator,
-            curation_weight,
-            time_delta_seconds
+            curator_rank,
+            discovery_w,
+            rank_w,
+            curation_weight
         );
         Ok(())
     }
 
     /// Deposit rewards to curation pool.
-    /// [audit fix C-1] performs an ACTUAL System-program SOL transfer from the
-    /// depositor signer into the program-owned `reward_vault` PDA, and gates
-    /// the caller to POOL_DEPOSITOR so attackers cannot inflate `total_pool`
-    /// without committing real lamports.
+    /// [audit fix C-1] real ORA token transfer.
+    /// [audit fix M-CR-1] SOL→ORA pool denomination per Handbook §10 — the
+    /// 10K + 10K daily curator/creator reward pools are denominated in ORA,
+    /// not SOL. Deposits now flow from the depositor's ORA ATA into a
+    /// program-owned ORA TokenAccount PDA via SPL `token::transfer`.
     pub fn deposit_to_pool(ctx: Context<DepositToPool>, amount: u64) -> Result<()> {
         let pool = &mut ctx.accounts.curation_pool;
 
         require!(!pool.is_settled, ErrorCode::PoolAlreadySettled);
         require!(amount > 0, ErrorCode::InvalidAmount);
 
-        // [audit fix C-1] actual lamport transfer into the program-owned vault.
-        // Without this, `total_pool` was a vanity counter anyone could inflate.
-        let cpi_ctx = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.depositor.to_account_info(),
-                to: ctx.accounts.reward_vault.to_account_info(),
-            },
+        // [audit fix M-CR-1] mint binding defense-in-depth. The Accounts
+        // context already constrains the depositor + vault to the ORA mint;
+        // re-check here in case future refactors loosen one constraint.
+        require!(
+            ctx.accounts.depositor_ora_account.mint == ORA_MINT
+                && ctx.accounts.reward_vault.mint == ORA_MINT,
+            ErrorCode::InvalidOraMint
         );
-        system_program::transfer(cpi_ctx, amount)?;
+        require!(
+            ctx.accounts.depositor_ora_account.owner == ctx.accounts.depositor.key(),
+            ErrorCode::InvalidOraOwner
+        );
+
+        // [audit fix M-CR-1] SPL token transfer (was system_program::Transfer).
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.depositor_ora_account.to_account_info(),
+                    to: ctx.accounts.reward_vault.to_account_info(),
+                    authority: ctx.accounts.depositor.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
 
         pool.total_pool = pool
             .total_pool
@@ -153,42 +271,27 @@ pub mod aura_curation {
             .ok_or(ErrorCode::Overflow)?;
 
         msg!(
-            "Deposited {} lamports to curation pool vault (vault now {})",
+            "Deposited {} ORA atomic units to curation pool vault (pool total now {})",
             amount,
-            ctx.accounts.reward_vault.lamports()
+            pool.total_pool
         );
         Ok(())
     }
 
-    /// Claim curation rewards
-    /// [audit fix C-2] reward_vault is now bound to program-owned PDA (see
-    /// InitializePool / ClaimCurationReward contexts). The lamport mutation is
-    /// safe because the vault is owned by this program.
-    /// [audit fix round2 C2.C-1] Settlement gate added: claims are only valid
-    /// AFTER `settle_pool` has run. Previously the first curator could race
-    /// every late curator by claiming while `pool.total_weight` was still
-    /// growing, draining the entire vault on a `weight_self / weight_self`
-    /// share.
-    /// [audit fix round2 C2.H-1] Rent-exempt floor enforced: the vault PDA
-    /// must retain at least the rent-exempt minimum after each claim, so the
-    /// Solana runtime cannot eventually garbage-collect it and brick future
-    /// claims / deposits.
+    /// Claim curation rewards.
+    /// [audit fix C-2 / round2 C2.C-1 / C2.H-1 / C2.M-1] see comments below.
+    /// [audit fix M-CR-1] SOL→ORA pool denomination per Handbook §10. Claims
+    /// now move ORA from the program-owned reward_vault token account to the
+    /// curator's ORA ATA via SPL `token::transfer` signed by the vault PDA.
     pub fn claim_curation_reward(ctx: Context<ClaimCurationReward>) -> Result<()> {
         let pool = &mut ctx.accounts.curation_pool;
         let record = &mut ctx.accounts.curation_record;
 
-        // [audit fix round2 C2.C-1] no early claims; total_weight must be frozen
         require!(pool.is_settled, ErrorCode::PoolNotSettled);
-
         require!(pool.total_pool > 0, ErrorCode::NoRewardsAvailable);
         require!(pool.total_weight > 0, ErrorCode::NoWeightInPool);
         require!(record.reward_claimed == 0, ErrorCode::AlreadyClaimed);
 
-        // [audit fix round2 C2.M-1] Use the immutable `settle_total_pool`
-        // snapshot as the divisor. This decouples per-curator share math from
-        // the live `total_pool` field, which is decremented after each claim
-        // (so off-chain UIs see remaining balance). Fall back to `total_pool`
-        // for any pre-fix-deployed pool where `settle_total_pool == 0`.
         let denom_pool = if pool.settle_total_pool > 0 {
             pool.settle_total_pool
         } else {
@@ -202,37 +305,48 @@ pub mod aura_curation {
 
         require!(reward_amount > 0, ErrorCode::NoRewardsAvailable);
 
-        // [audit fix C-2] vault is program-owned (enforced by `owner = crate::ID`
-        // on the context), so direct lamport mutation is permitted by the
-        // Solana runtime.
-        let vault_lamports = ctx.accounts.reward_vault.lamports();
-        require!(vault_lamports >= reward_amount, ErrorCode::NoRewardsAvailable);
+        // [audit fix M-CR-1] vault balance check on the ORA TokenAccount.
+        let vault_balance = ctx.accounts.reward_vault.amount;
+        require!(vault_balance >= reward_amount, ErrorCode::NoRewardsAvailable);
 
-        // [audit fix round2 C2.H-1] enforce rent-exempt minimum on the vault
-        // after deducting `reward_amount`. Vault was init'd with `space = 0`
-        // so the rent-exempt floor is the minimum_balance for a 0-byte account.
-        // If we ever let the vault drop below this, the runtime can garbage-
-        // collect it and every subsequent claim / deposit fails.
-        let rent_exempt_min = Rent::get()?.minimum_balance(0);
-        let vault_after = vault_lamports
-            .checked_sub(reward_amount)
-            .ok_or(ErrorCode::NoRewardsAvailable)?;
-        require!(vault_after >= rent_exempt_min, ErrorCode::VaultUnderRent);
+        // [audit fix M-CR-1] curator destination ATA must be ORA + owned by curator.
+        require!(
+            ctx.accounts.curator_ora_account.mint == ORA_MINT,
+            ErrorCode::InvalidOraMint
+        );
+        require!(
+            ctx.accounts.curator_ora_account.owner == ctx.accounts.curator.key(),
+            ErrorCode::InvalidOraOwner
+        );
 
-        **ctx.accounts.reward_vault.to_account_info().try_borrow_mut_lamports()? -= reward_amount;
-        **ctx.accounts.curator.to_account_info().try_borrow_mut_lamports()? += reward_amount;
-
+        // Persist state BEFORE the CPI (re-entrancy hardening, matches
+        // ora::mint_ora / staking::claim_staking_reward patterns).
         record.reward_claimed = reward_amount;
-
-        // [audit fix round2 C2.M-1] decrement live `total_pool` so off-chain
-        // UIs reading the field show the true remaining budget. Share math
-        // still uses `settle_total_pool` (see above), so late claimers are
-        // unaffected by this decrement.
         pool.total_pool = pool.total_pool.saturating_sub(reward_amount);
 
+        // PDA signer for the program-owned reward_vault token account.
+        let content_key = ctx.accounts.content.key();
+        let vault_bump = ctx.bumps.reward_vault;
+        let seeds: &[&[u8]] = &[b"reward_vault", content_key.as_ref(), &[vault_bump]];
+        let signer = &[seeds];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.reward_vault.to_account_info(),
+                    to: ctx.accounts.curator_ora_account.to_account_info(),
+                    authority: ctx.accounts.reward_vault.to_account_info(),
+                },
+                signer,
+            ),
+            reward_amount,
+        )?;
+
         msg!(
-            "Curator {} claimed {} lamports (weight: {}/{})",
+            "Curator {} (rank {}) claimed {} ORA atomic units (weight: {}/{})",
             record.curator,
+            record.curator_rank,
             reward_amount,
             record.curation_weight,
             pool.total_weight
@@ -240,18 +354,15 @@ pub mod aura_curation {
         Ok(())
     }
 
-    /// Settle pool (mark as final, no more curations allowed)
-    /// [audit fix C-H4] permissionlessness is fine because the function is
-    /// gated by a hard 72-hour timeout invariant; anyone observing that
-    /// timeout can finalize. Adding an admin gate as defense-in-depth.
-    /// [audit fix round2 C2.M-1] snapshot `total_pool` into `settle_total_pool`
-    /// so per-curator share math is frozen at settle-time and unaffected by
-    /// the live decrement applied in `claim_curation_reward`.
+    /// Settle pool (mark as final).
+    /// Settlement can run after 72 hours from content publication — Handbook §10
+    /// calls for daily protocol-wide settlement, but per-content 72-hr settlement
+    /// remains the on-chain finalization gate so a single late-arriving curator
+    /// cannot reshape the weight distribution after the discovery window closes.
     pub fn settle_pool(ctx: Context<SettlePool>) -> Result<()> {
         let pool = &mut ctx.accounts.curation_pool;
         let clock = Clock::get()?;
 
-        // Pool can be settled after 72 hours from content publication
         let time_elapsed = clock.unix_timestamp - pool.content_publish_time;
         let settlement_period: i64 = 72 * 60 * 60; // 72 hours
 
@@ -262,7 +373,6 @@ pub mod aura_curation {
         require!(!pool.is_settled, ErrorCode::PoolAlreadySettled);
 
         pool.is_settled = true;
-        // [audit fix round2 C2.M-1] freeze the divisor for share math
         pool.settle_total_pool = pool.total_pool;
 
         msg!(
@@ -274,20 +384,60 @@ pub mod aura_curation {
     }
 }
 
-/// [audit fix round2 C2.C-2] Manually deserialize a core-owned `Post`.
-///
-/// Anchor's `Account<T>` checks `account.owner == T::owner()` (where
-/// `T::owner()` for an `#[account]` struct returns the program ID of the crate
-/// that declared it). Since `Post` is declared in `aura_core`, an
-/// `Account<Post>` declared in *this* crate would actually expect ownership by
-/// `aura_curation::ID` — which is wrong (Posts are owned by `aura_core::ID`).
-///
-/// This helper performs the manual validation:
-///   1. owner == AURA_CORE_PROGRAM_ID
-///   2. data length is large enough to contain the discriminator + struct
-///   3. discriminator matches sha256("account:Post")[..8]
-///   4. decode the first two fields we care about (author, created_at) using
-///      Anchor's borsh-derived layout.
+// ─── Weight helpers (Handbook §10) ──────────────────────────────────────
+
+/// [whitepaper-sync v1.1] Discovery Weight by creator follower count
+/// (Handbook §10 / WP v1.1 §8.4.2). Returned scaled by `WEIGHT_SCALE = 100`:
+///   <100        → 500  (5.0×)
+///   100–1,000   → 300  (3.0×)
+///   1K–10K      → 150  (1.5×)
+///   10K–100K    → 100  (1.0×)
+///   >100K       → 50   (0.5×)
+fn discovery_weight(follower_count: u64) -> u64 {
+    if follower_count < 100 {
+        500
+    } else if follower_count < 1_000 {
+        300
+    } else if follower_count < 10_000 {
+        150
+    } else if follower_count < 100_000 {
+        100
+    } else {
+        50
+    }
+}
+
+/// [whitepaper-sync v1.1] Curator Rank Weight by order of curation
+/// (Handbook §10 / WP v1.1 §8.4.1). Handbook lists:
+///   1st curator: 5×
+///   2nd–10th:    declining (interpolated below)
+///   11th–50th:   2×
+///   51st–200th:  1.5×
+///   201st–500th: 1.2×
+///   501st+:      0.5× (Handbook published floor — supersedes the "1×"
+///                       value in earlier WP §8.4.1 drafts)
+/// Returned scaled by `WEIGHT_SCALE = 100`.
+fn curator_rank_weight(rank: u32) -> u64 {
+    match rank {
+        1 => 500,
+        2 => 450,
+        3 => 420,
+        4 => 400,
+        5 => 380,
+        6 => 360,
+        7 => 340,
+        8 => 320,
+        9 => 310,
+        10 => 300,
+        11..=50 => 200,
+        51..=200 => 150,
+        201..=500 => 120,
+        _ => 50,
+    }
+}
+
+// ─── Post decoder (unchanged from prior audit fix) ──────────────────────
+
 fn decode_core_post(content: &UncheckedAccount) -> Result<DecodedPost> {
     require!(
         content.owner == &AURA_CORE_PROGRAM_ID,
@@ -295,14 +445,8 @@ fn decode_core_post(content: &UncheckedAccount) -> Result<DecodedPost> {
     );
 
     let data = content.try_borrow_data()?;
-    // 8 (discriminator) + 32 (author) + 4 (arweave_tx_id len prefix) is the
-    // minimum length required before we touch any non-prefix bytes.
     require!(data.len() >= 8 + 32 + 4, ErrorCode::InvalidContentData);
 
-    // [audit fix R3-C3-I-1] Anchor account discriminator = sha256("account:<TypeName>")[..8].
-    // Computed at runtime via solana_program::hash; bytes match sha256("account:Post")[..8].
-    // Computing at runtime (rather than hardcoding) avoids any hex transcription
-    // mistake and the BPF runtime supports the sol_sha256 syscall cheaply.
     let computed = anchor_lang::solana_program::hash::hash(b"account:Post");
     let expected_disc = &computed.to_bytes()[..8];
     require!(
@@ -310,25 +454,11 @@ fn decode_core_post(content: &UncheckedAccount) -> Result<DecodedPost> {
         ErrorCode::InvalidContentDiscriminator
     );
 
-    // Layout (matches core::Post):
-    //   8  discriminator
-    //  32  author : Pubkey
-    //   4  arweave_tx_id length prefix
-    //   N  arweave_tx_id bytes
-    //   1  content_type (enum)
-    //   1  access_control (enum)
-    //   8  price : u64
-    //   8  likes : u64
-    //   8  views : u64
-    //   8  tips_received : u64
-    //   8  created_at : i64
-    //   ...
     let mut author_bytes = [0u8; 32];
     author_bytes.copy_from_slice(&data[8..40]);
     let author = Pubkey::new_from_array(author_bytes);
 
     let str_len = u32::from_le_bytes(data[40..44].try_into().unwrap_or([0; 4])) as usize;
-    // Position of created_at: 8 + 32 + 4 + str_len + 1 + 1 + 8 + 8 + 8 + 8
     let created_at_off = 8 + 32 + 4 + str_len + 1 + 1 + 8 + 8 + 8 + 8;
     require!(
         data.len() >= created_at_off + 8,
@@ -338,11 +468,6 @@ fn decode_core_post(content: &UncheckedAccount) -> Result<DecodedPost> {
     ts_bytes.copy_from_slice(&data[created_at_off..created_at_off + 8]);
     let created_at = i64::from_le_bytes(ts_bytes);
 
-    // [audit fix R3-M-2] read `is_active: bool` (the byte immediately after
-    // `created_at`) and reject if the core program has marked the post
-    // inactive (e.g. moderation / DMCA / burn-after-reading). Defence in
-    // depth so curation pools cannot form against, or pay out for, content
-    // that the core program has already buried.
     let is_active_off = created_at_off + 8;
     require!(
         data.len() >= is_active_off + 1,
@@ -354,52 +479,22 @@ fn decode_core_post(content: &UncheckedAccount) -> Result<DecodedPost> {
     Ok(DecodedPost { author, created_at })
 }
 
-/// [audit fix round2 C2.C-2] Minimal decoded view of a core::Post, owned by
-/// the curation program logic so we don't have to re-derive `#[account]` and
-/// risk a discriminator collision with core::Post (see C2.M-2).
 struct DecodedPost {
     pub author: Pubkey,
     pub created_at: i64,
 }
 
-/// Calculate time decay weight based on discovery time
-/// - First 1 hour discovery: 10x
-/// - 1-6 hours: 5x
-/// - 6-24 hours: 2x
-/// - 24-72 hours: 1x
-/// - After 72 hours: 0.1x
-fn calculate_time_decay_weight(time_delta_seconds: i64) -> Result<u64> {
-    const HOUR: i64 = 60 * 60;
-    const BASE_WEIGHT: u64 = 1000; // Use 1000 as base for better precision
+// ─── Account structures ─────────────────────────────────────────────────
 
-    let weight = if time_delta_seconds < HOUR {
-        // First hour: 10x
-        BASE_WEIGHT * 10
-    } else if time_delta_seconds < 6 * HOUR {
-        // 1-6 hours: 5x
-        BASE_WEIGHT * 5
-    } else if time_delta_seconds < 24 * HOUR {
-        // 6-24 hours: 2x
-        BASE_WEIGHT * 2
-    } else if time_delta_seconds < 72 * HOUR {
-        // 24-72 hours: 1x
-        BASE_WEIGHT
-    } else {
-        // After 72 hours: 0.1x
-        BASE_WEIGHT / 10
-    };
-
-    Ok(weight)
-}
-
-// Account structures
 #[account]
 pub struct CurationRecord {
     pub curator: Pubkey,
     pub content_id: Pubkey,
     pub curated_at: i64,
     pub content_publish_time: i64,
-    pub time_delta_seconds: i64,
+    /// [whitepaper-sync v1.1] curator rank at time of curation (was `time_delta_seconds`).
+    /// 1-indexed position in the pool's curation order.
+    pub curator_rank: u32,
     pub curation_weight: u64,
     pub reward_claimed: u64,
     pub bump: u8,
@@ -410,67 +505,62 @@ pub struct CurationPool {
     pub content_id: Pubkey,
     pub content_publish_time: i64,
     /// Total lamports remaining in the pool (decremented on each claim).
-    /// [audit fix round2 C2.M-1] off-chain UIs reading this field now see the
-    /// *remaining* balance, not the cumulative ever-deposited amount.
     pub total_pool: u64,
     pub total_weight: u64,
     pub curators_count: u32,
     pub is_settled: bool,
     pub bump: u8,
-    /// [audit fix round2 C2.M-1] Snapshot of `total_pool` at settle-time.
-    /// Used as the immutable denominator for pro-rata share calculation
-    /// (weight_self / total_weight * settle_total_pool). This decouples
-    /// the share math from `total_pool` so we can safely decrement it on
-    /// every claim without breaking late claimers.
+    /// Snapshot of `total_pool` at settle-time (frozen denominator).
     pub settle_total_pool: u64,
+    /// [whitepaper-sync v1.1] creator follower count at pool-init time.
+    /// Drives the Discovery Weight tier. Captured once, never updated.
+    pub creator_follower_count: u64,
+    /// [whitepaper-sync v1.1] cached `core::Post.author` so we don't have to
+    /// re-decode the core-owned Post on every settle/inspect call.
+    pub creator_author: Pubkey,
 }
 
-// [audit fix round2 C2.C-2 / C2.M-2] Removed the local `#[account] pub struct
-// Post {...}` redeclaration. Decoding is now done in `decode_core_post` via
-// manual byte slicing, and the discriminator-collision footgun with
-// `aura_core::Post` is eliminated.
+// ─── Contexts ───────────────────────────────────────────────────────────
 
-// Context structures
-
-// [audit fix C-H1] only POOL_INITIALIZER may bootstrap a pool.
-// [audit fix C-2] initialize the reward_vault as a program-owned PDA atomically,
-// so it has a known owner from the very first instruction.
-// [audit fix round2 C2.M-1] +8 bytes for settle_total_pool field
 #[derive(Accounts)]
 pub struct InitializePool<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 8 + 8 + 8 + 4 + 1 + 1 + 8,
+        // discriminator(8) + content_id(32) + publish_time(8) + total_pool(8)
+        // + total_weight(8) + curators_count(4) + is_settled(1) + bump(1)
+        // + settle_total_pool(8) + creator_follower_count(8) + creator_author(32)
+        space = 8 + 32 + 8 + 8 + 8 + 4 + 1 + 1 + 8 + 8 + 32,
         seeds = [b"curation_pool", content.key().as_ref()],
         bump
     )]
     pub curation_pool: Account<'info, CurationPool>,
 
-    /// CHECK: Core-program-owned Post account; validated manually in body via
-    /// `decode_core_post` (owner == AURA_CORE_PROGRAM_ID + discriminator match).
-    /// [audit fix round2 C2.C-2] cannot use Account<T> here because T's owner
-    /// would be inferred as `aura_curation::ID` and Anchor would reject a real
-    /// core-owned Post at deserialization.
+    /// CHECK: Core-program-owned Post account; validated manually.
     pub content: UncheckedAccount<'info>,
 
-    /// CHECK: Reward vault PDA, program-owned, created atomically with the pool.
-    /// [audit fix C-2] this is a SystemAccount with space=0 so it can hold
-    /// lamports; ownership is set to this program via the init seed.
+    /// [audit fix M-CR-1] SOL→ORA: reward_vault is now an SPL TokenAccount
+    /// PDA holding ORA, with authority = vault itself (the PDA signs its
+    /// own outbound transfers). Mint pinned to `ORA_MINT`.
     #[account(
         init,
         payer = authority,
-        space = 0,
         seeds = [b"reward_vault", content.key().as_ref()],
         bump,
-        owner = crate::ID,
+        token::mint = ora_mint,
+        token::authority = reward_vault,
     )]
-    pub reward_vault: AccountInfo<'info>,
+    pub reward_vault: Account<'info, TokenAccount>,
 
-    // [audit fix C-H1] gate caller to the protocol pool-initializer
+    /// [audit fix M-CR-1] ORA mint must equal the hardcoded `ORA_MINT` const.
+    #[account(address = ORA_MINT @ ErrorCode::InvalidOraMint)]
+    pub ora_mint: Account<'info, Mint>,
+
     #[account(mut, address = POOL_INITIALIZER @ ErrorCode::Unauthorized)]
     pub authority: Signer<'info>,
 
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
     pub system_program: Program<'info, System>,
 }
 
@@ -479,7 +569,10 @@ pub struct Curate<'info> {
     #[account(
         init,
         payer = curator,
-        space = 8 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 1,
+        // discriminator(8) + curator(32) + content_id(32) + curated_at(8)
+        // + content_publish_time(8) + curator_rank(4) + curation_weight(8)
+        // + reward_claimed(8) + bump(1)
+        space = 8 + 32 + 32 + 8 + 8 + 4 + 8 + 8 + 1,
         seeds = [b"curation_record", content.key().as_ref(), curator.key().as_ref()],
         bump
     )]
@@ -488,20 +581,33 @@ pub struct Curate<'info> {
     #[account(mut, seeds = [b"curation_pool", content.key().as_ref()], bump = curation_pool.bump)]
     pub curation_pool: Account<'info, CurationPool>,
 
-    /// CHECK: Core-program-owned Post account; validated manually in body via
-    /// `decode_core_post`. We must NOT use Account<Post> because the real Post
-    /// is owned by aura_core, not aura_curation, so Anchor's owner check
-    /// would reject every call. See round-2 audit C2.C-2.
+    /// CHECK: Core-program-owned Post account; validated manually.
     pub content: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub curator: Signer<'info>,
 
+    /// [whitepaper-sync v1.1] Curator's ORA SPL token account. Used to:
+    ///   1. enforce the 100-ORA sybil holding floor (`amount >= 100 ORA`)
+    ///   2. debit the 1-ORA per-curation cost via `token::transfer`
+    /// `mint`/`owner` are re-checked in the body against ORA_MINT and the
+    /// curator signer key.
+    #[account(mut)]
+    pub curator_ora_account: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] ORA fee sink — receives the 1-ORA per-curation
+    /// cost. At mainnet this is the curator-reward pool ATA so the cost
+    /// recycles into the 10K ORA / day Curator Reward Pool (Handbook §10).
+    /// Hardcoded address check in the body against `CURATION_FEE_SINK`.
+    /// CHECK: address-checked in body; mint compatibility enforced by
+    /// `token::transfer` (CPI would fail on mismatched mint anyway).
+    #[account(mut)]
+    pub curation_fee_sink: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
-// [audit fix C-1] depositor MUST be POOL_DEPOSITOR and MUST sign a real SOL
-// transfer into reward_vault. No more vanity counter inflation.
 #[derive(Accounts)]
 pub struct DepositToPool<'info> {
     #[account(mut, seeds = [b"curation_pool", content.key().as_ref()], bump = curation_pool.bump)]
@@ -510,23 +616,34 @@ pub struct DepositToPool<'info> {
     /// CHECK: Content account (only used as a seed for the vault PDA)
     pub content: AccountInfo<'info>,
 
-    /// CHECK: Program-owned reward vault PDA. Lamports are added via System
-    /// program transfer; the program owns the account so it can later move
-    /// lamports out in `claim_curation_reward`.
+    /// [audit fix M-CR-1] Program-owned reward vault as an ORA TokenAccount
+    /// PDA. Mint + authority constraints validate it was created by
+    /// `initialize_pool` (same seed derivation).
     #[account(
         mut,
         seeds = [b"reward_vault", content.key().as_ref()],
         bump,
-        owner = crate::ID @ ErrorCode::Unauthorized,
+        token::mint = ora_mint,
+        token::authority = reward_vault,
     )]
-    pub reward_vault: AccountInfo<'info>,
+    pub reward_vault: Account<'info, TokenAccount>,
 
-    // [audit fix C-1] gate to POOL_DEPOSITOR (typically the protocol revenue
-    // splitter / a fee-handler PDA from another program). Only this party is
-    // allowed to credit `total_pool`.
+    /// [audit fix M-CR-1] Depositor's ORA token account. Mint + owner are
+    /// also re-checked in the handler body.
+    #[account(
+        mut,
+        constraint = depositor_ora_account.mint == ORA_MINT @ ErrorCode::InvalidOraMint,
+        constraint = depositor_ora_account.owner == depositor.key() @ ErrorCode::InvalidOraOwner,
+    )]
+    pub depositor_ora_account: Account<'info, TokenAccount>,
+
+    #[account(address = ORA_MINT @ ErrorCode::InvalidOraMint)]
+    pub ora_mint: Account<'info, Mint>,
+
     #[account(mut, address = POOL_DEPOSITOR @ ErrorCode::Unauthorized)]
     pub depositor: Signer<'info>,
 
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -540,35 +657,41 @@ pub struct ClaimCurationReward<'info> {
     )]
     pub curation_record: Account<'info, CurationRecord>,
 
-    // [audit fix R3-M-1] `mut` added so the `pool.total_pool` decrement at the
-    // bottom of `claim_curation_reward` is actually persisted. Without `mut`,
-    // Anchor never re-serializes the account on Exit and the C2.M-1 fix silently
-    // no-ops (or fails with ReadonlyDataModified on stricter runtimes).
     #[account(mut, seeds = [b"curation_pool", content.key().as_ref()], bump = curation_pool.bump)]
     pub curation_pool: Account<'info, CurationPool>,
 
     /// CHECK: Content account
     pub content: AccountInfo<'info>,
 
-    /// CHECK: Reward vault PDA holding SOL. Program-owned (enforced).
-    /// [audit fix C-2] explicit `owner = crate::ID` so a wrong-owner account
-    /// passed here is rejected before the lamport mutation is attempted.
+    /// [audit fix M-CR-1] Reward vault PDA holding ORA (was SOL).
+    /// Seed + mint + token::authority pin it to the curation program PDA.
     #[account(
         mut,
         seeds = [b"reward_vault", content.key().as_ref()],
         bump,
-        owner = crate::ID @ ErrorCode::Unauthorized,
+        token::mint = ora_mint,
+        token::authority = reward_vault,
     )]
-    pub reward_vault: AccountInfo<'info>,
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    /// [audit fix M-CR-1] Curator's ORA destination ATA. Mint + owner also
+    /// rechecked in the handler body.
+    #[account(
+        mut,
+        constraint = curator_ora_account.mint == ORA_MINT @ ErrorCode::InvalidOraMint,
+        constraint = curator_ora_account.owner == curator.key() @ ErrorCode::InvalidOraOwner,
+    )]
+    pub curator_ora_account: Account<'info, TokenAccount>,
+
+    #[account(address = ORA_MINT @ ErrorCode::InvalidOraMint)]
+    pub ora_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub curator: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
 
-// [audit fix C-H4] gate settle to PROGRAM_ADMIN as defense-in-depth. The
-// 72-hour timeout already makes the call safe to invoke by anyone, but
-// admin-gating keeps the social-graph clean and prevents speculative early
-// settlements via grief-time-warps in test forks.
 #[derive(Accounts)]
 pub struct SettlePool<'info> {
     #[account(mut, seeds = [b"curation_pool", content.key().as_ref()], bump = curation_pool.bump)]
@@ -581,7 +704,8 @@ pub struct SettlePool<'info> {
     pub authority: Signer<'info>,
 }
 
-// Error codes
+// ─── Errors ─────────────────────────────────────────────────────────────
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Curation pool has already been settled")]
@@ -605,27 +729,21 @@ pub enum ErrorCode {
     #[msg("Settlement period not reached (72 hours required)")]
     SettlementPeriodNotReached,
 
-    // [audit fix C-H2]
     #[msg("Author cannot curate their own content")]
     SelfCurationForbidden,
 
-    // [audit fix C-1 / C-H1 / C-H4]
     #[msg("Unauthorized")]
     Unauthorized,
 
-    // [audit fix C-1 / curate / claim — overflow paths]
     #[msg("Arithmetic overflow")]
     Overflow,
 
-    // [audit fix round2 C2.C-1] claim before settlement
     #[msg("Curation pool has not been settled yet")]
     PoolNotSettled,
 
-    // [audit fix round2 C2.H-1] vault would drop below rent-exempt minimum
     #[msg("Reward vault would drop below rent-exempt minimum")]
     VaultUnderRent,
 
-    // [audit fix round2 C2.C-2] manual Post deserialization failures
     #[msg("Content account is not owned by the AURA core program")]
     InvalidContentOwner,
 
@@ -635,9 +753,22 @@ pub enum ErrorCode {
     #[msg("Content account discriminator does not match core::Post")]
     InvalidContentDiscriminator,
 
-    // [audit fix R3-M-2] core::Post.is_active is false (post is moderated /
-    // deactivated / burned). Curation must not form pools against, or pay
-    // out for, content the core program has marked inactive.
     #[msg("Content has been deactivated by the core program")]
     ContentNotActive,
+
+    // [whitepaper-sync v1.1] new error codes for Handbook §10 enforcement
+    #[msg("Curator ORA token account uses the wrong mint")]
+    InvalidOraMint,
+
+    #[msg("Curator ORA token account is not owned by the curator signer")]
+    InvalidOraOwner,
+
+    #[msg("Curator does not hold the 100-ORA sybil-threshold minimum")]
+    BelowSybilThreshold,
+
+    #[msg("Curation fee sink address does not match the protocol constant")]
+    InvalidFeeSink,
+
+    #[msg("Computed curation weight is zero (refusing to record)")]
+    ZeroWeight,
 }

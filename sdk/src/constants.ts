@@ -29,6 +29,10 @@ export const PROGRAM_IDS = {
     reputation: new PublicKey('GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg'),
     socialGraph: new PublicKey('GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN'),
     typeB: new PublicKey('2Y6gMW2CRePALFRfJ4RCBTtQmJb2YHt4B5b9cHgDt9Kw'),
+    // [whitepaper-sync v1.1] §13 content-keys — placeholder program id; replace pre-mainnet.
+    contentKeys: new PublicKey('CX6wqdXrR1C8sz8A7DWJ8fE2utXHivif7j1ie91i8Y3v'),
+    // [whitepaper-sync v1.1] §5.6 launch-incentives — placeholder program id; replace pre-mainnet.
+    launchIncentives: new PublicKey('GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf'),
   },
   TESTNET: {
     core: new PublicKey('CoreProgram11111111111111111111111111111111'),
@@ -54,6 +58,10 @@ export const PROGRAM_IDS = {
     reputation: new PublicKey('GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg'),
     socialGraph: new PublicKey('GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN'),
     typeB: new PublicKey('2Y6gMW2CRePALFRfJ4RCBTtQmJb2YHt4B5b9cHgDt9Kw'),
+    // [whitepaper-sync v1.1] §13 content-keys — placeholder program id; replace pre-mainnet.
+    contentKeys: new PublicKey('CX6wqdXrR1C8sz8A7DWJ8fE2utXHivif7j1ie91i8Y3v'),
+    // [whitepaper-sync v1.1] §5.6 launch-incentives — placeholder program id; replace pre-mainnet.
+    launchIncentives: new PublicKey('GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf'),
   },
 };
 

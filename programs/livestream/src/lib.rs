@@ -15,19 +15,39 @@ pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
 /// Hardcoded staking-rewards pool (token account). 2% of tips flow here.
 pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 
-/// Hardcoded platform treasury (token account). 0.5% of tips + subscription
-/// fees + PPV fees flow here.
+/// Hardcoded ops treasury (token account). 0.5% of tips + subscription
+/// fees + PPV fees flow here (protocol operations leg).
+/// [whitepaper-sync v1.1] renamed from PLATFORM_TREASURY; was a single 0.5%
+/// leg, now split into ops (0.5%) + gas reserve (0.5%) per WP §5.7.
+/// ⚠️ DO NOT DEPLOY — placeholder set to system_program::ID.
 pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+
+/// [whitepaper-sync v1.1] Hardcoded gas-reserve pool (token account).
+/// 0.5% of every livestream-channel fee flows here, matching the WP §5.7
+/// unified 5% = 2/2/0.5/0.5 split. The previous 3-way split silently
+/// dropped the gas-reserve leg, starving the pool that pays Solana base
+/// fees for new-user gas abstraction (WP §5.13).
+/// ⚠️ DO NOT DEPLOY — placeholder set to system_program::ID.
+pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 
 /// Hardcoded protocol oracle authorised to report off-chain stats (e.g.,
 /// `peak_viewers`). [audit fix C-L4] Without this signature `end_stream`
 /// cannot mutate viewer counts.
 pub const PEAK_VIEWERS_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
 
-/// Fee split: 5% total = 2.5% burn + 2% staking + 0.5% platform
-const BURN_BPS: u64 = 250;
+/// [whitepaper-sync v1.1] Fee split: 5% total = 2% burn + 2% staking + 0.5%
+/// gas reserve + 0.5% ops, matching Whitepaper v1.1 §5.7 and Numbers
+/// Handbook §5 (40/40/10/10 of the 5% fee). Previous values were
+/// BURN_BPS=250 / STAKING_BPS=200 / PLATFORM_BPS=50 (a 3-way 2.5/2/0.5
+/// split that omitted the gas-reserve leg). All four legs are now routed
+/// through dedicated transfers in tip_streamer / subscribe_to_creator /
+/// renew_subscription / purchase_ppv.
+const BURN_BPS: u64 = 200;
 const STAKING_BPS: u64 = 200;
-const PLATFORM_BPS: u64 = 50;
+const GAS_BPS: u64 = 50;
+const OPS_BPS: u64 = 50;
+/// [whitepaper-sync v1.1] Kept for documentation: total = BURN + STAKING + GAS + OPS.
+#[allow(dead_code)]
 const FEE_BPS: u64 = 500;
 const LARGE_TIP_THRESHOLD: u64 = 100_000_000; // 100 ORA (6 decimals)
 
@@ -107,9 +127,11 @@ pub mod aura_livestream {
         Ok(())
     }
 
-    /// Fan tips a streamer with ORA. 5% fee (2.5% burn + 2% staking + 0.5% platform)
+    /// Fan tips a streamer with ORA. 5% fee (2% burn + 2% staking + 0.5% gas
+    /// reserve + 0.5% ops) per Whitepaper v1.1 §5.7.
     /// [audit fix C-L1] all token accounts + mint are constrained to canonical
     /// protocol addresses. [audit fix M-L2] tipping requires `stream.is_live`.
+    /// [whitepaper-sync v1.1] split now 4-way; gas-reserve leg added.
     pub fn tip_streamer(ctx: Context<TipStreamer>, amount: u64, tip_nonce: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
         // [audit fix M-L2] can only tip a live stream
@@ -117,16 +139,19 @@ pub mod aura_livestream {
 
         let burn_amount = amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         let staking_amount = amount.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
-        let platform_amount = amount.checked_mul(PLATFORM_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let gas_amount = amount.checked_mul(GAS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let ops_amount = amount.checked_mul(OPS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
         let creator_amount = amount
             .checked_sub(burn_amount)
             .ok_or(ErrorCode::Overflow)?
             .checked_sub(staking_amount)
             .ok_or(ErrorCode::Overflow)?
-            .checked_sub(platform_amount)
+            .checked_sub(gas_amount)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_sub(ops_amount)
             .ok_or(ErrorCode::Overflow)?;
 
-        // Transfer to creator
+        // Transfer to creator (95%)
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -136,7 +161,7 @@ pub mod aura_livestream {
             },
         ), creator_amount)?;
 
-        // Transfer to staking pool
+        // Transfer to staking pool (2%)
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -146,7 +171,17 @@ pub mod aura_livestream {
             },
         ), staking_amount)?;
 
-        // Transfer to platform treasury
+        // [whitepaper-sync v1.1] Transfer to gas reserve pool (0.5%)
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.gas_reserve_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), gas_amount)?;
+
+        // Transfer to ops treasury (0.5%)
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -154,9 +189,9 @@ pub mod aura_livestream {
                 to: ctx.accounts.platform_treasury.to_account_info(),
                 authority: ctx.accounts.fan.to_account_info(),
             },
-        ), platform_amount)?;
+        ), ops_amount)?;
 
-        // Burn 2.5%
+        // Burn 2%
         token::burn(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Burn {
@@ -181,8 +216,8 @@ pub mod aura_livestream {
         tip_record.tip_nonce = tip_nonce;
         tip_record.bump = ctx.bumps.tip_record;
 
-        msg!("Tip: {} ORA (burn={} staking={} platform={} creator={})",
-            amount, burn_amount, staking_amount, platform_amount, creator_amount);
+        msg!("Tip: {} ORA (burn={} staking={} gas={} ops={} creator={})",
+            amount, burn_amount, staking_amount, gas_amount, ops_amount, creator_amount);
         Ok(())
     }
 
@@ -218,10 +253,19 @@ pub mod aura_livestream {
         require!(monthly_amount >= MIN_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
         require!(monthly_amount <= MAX_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
 
-        let fee = monthly_amount.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
-        let creator_amount = monthly_amount.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
+        // [whitepaper-sync v1.1] 4-way fee split per WP §5.7
+        // (2% burn / 2% staking / 0.5% gas / 0.5% ops).
+        let burn_amount = monthly_amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let staking_amount = monthly_amount.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let gas_amount = monthly_amount.checked_mul(GAS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let ops_amount = monthly_amount.checked_mul(OPS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = monthly_amount
+            .checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(gas_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(ops_amount).ok_or(ErrorCode::Overflow)?;
 
-        // Transfer to creator
+        // Transfer to creator (95%)
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -231,7 +275,27 @@ pub mod aura_livestream {
             },
         ), creator_amount)?;
 
-        // Fee to platform
+        // 2% staking
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.staking_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), staking_amount)?;
+
+        // 0.5% gas reserve
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.gas_reserve_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), gas_amount)?;
+
+        // 0.5% ops
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -239,7 +303,17 @@ pub mod aura_livestream {
                 to: ctx.accounts.platform_treasury.to_account_info(),
                 authority: ctx.accounts.fan.to_account_info(),
             },
-        ), fee)?;
+        ), ops_amount)?;
+
+        // 2% burn
+        token::burn(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Burn {
+                mint: ctx.accounts.ora_mint.to_account_info(),
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), burn_amount)?;
 
         let sub = &mut ctx.accounts.subscription;
         let now = Clock::get()?.unix_timestamp;
@@ -251,7 +325,8 @@ pub mod aura_livestream {
         sub.is_active = true;
         sub.bump = ctx.bumps.subscription;
 
-        msg!("Subscription: fan={} creator={} amount={}", sub.fan, sub.creator, monthly_amount);
+        msg!("Subscription: fan={} creator={} amount={} (burn={} staking={} gas={} ops={})",
+            sub.fan, sub.creator, monthly_amount, burn_amount, staking_amount, gas_amount, ops_amount);
         Ok(())
     }
 
@@ -276,9 +351,19 @@ pub mod aura_livestream {
         require!(monthly_amount >= MIN_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
         require!(monthly_amount <= MAX_SUBSCRIPTION_AMOUNT, ErrorCode::InvalidAmount);
 
-        let fee = monthly_amount.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
-        let creator_amount = monthly_amount.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
+        // [whitepaper-sync v1.1] 4-way fee split per WP §5.7
+        // (2% burn / 2% staking / 0.5% gas / 0.5% ops).
+        let burn_amount = monthly_amount.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let staking_amount = monthly_amount.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let gas_amount = monthly_amount.checked_mul(GAS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let ops_amount = monthly_amount.checked_mul(OPS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = monthly_amount
+            .checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(gas_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(ops_amount).ok_or(ErrorCode::Overflow)?;
 
+        // Creator 95%
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -288,6 +373,27 @@ pub mod aura_livestream {
             },
         ), creator_amount)?;
 
+        // 2% staking
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.staking_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), staking_amount)?;
+
+        // 0.5% gas reserve
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.gas_reserve_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), gas_amount)?;
+
+        // 0.5% ops
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -295,7 +401,17 @@ pub mod aura_livestream {
                 to: ctx.accounts.platform_treasury.to_account_info(),
                 authority: ctx.accounts.fan.to_account_info(),
             },
-        ), fee)?;
+        ), ops_amount)?;
+
+        // 2% burn
+        token::burn(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Burn {
+                mint: ctx.accounts.ora_mint.to_account_info(),
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), burn_amount)?;
 
         let sub = &mut ctx.accounts.subscription;
         let now = Clock::get()?.unix_timestamp;
@@ -307,7 +423,8 @@ pub mod aura_livestream {
         // creator-controlled price at renewal time.
         sub.monthly_amount = monthly_amount;
 
-        msg!("Subscription renewed until {} amount={}", sub.expires_at, monthly_amount);
+        msg!("Subscription renewed until {} amount={} (burn={} staking={} gas={} ops={})",
+            sub.expires_at, monthly_amount, burn_amount, staking_amount, gas_amount, ops_amount);
         Ok(())
     }
 
@@ -367,10 +484,20 @@ pub mod aura_livestream {
 
         let price = ppv.price;
         let ppv_id = ppv.ppv_id;
-        let fee = price.checked_mul(FEE_BPS).ok_or(ErrorCode::Overflow)? / 10000;
-        let creator_amount = price.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
 
-        // Transfer to creator
+        // [whitepaper-sync v1.1] 4-way fee split per WP §5.7
+        // (2% burn / 2% staking / 0.5% gas / 0.5% ops).
+        let burn_amount = price.checked_mul(BURN_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let staking_amount = price.checked_mul(STAKING_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let gas_amount = price.checked_mul(GAS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let ops_amount = price.checked_mul(OPS_BPS).ok_or(ErrorCode::Overflow)? / 10000;
+        let creator_amount = price
+            .checked_sub(burn_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(gas_amount).ok_or(ErrorCode::Overflow)?
+            .checked_sub(ops_amount).ok_or(ErrorCode::Overflow)?;
+
+        // Creator 95%
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -380,7 +507,27 @@ pub mod aura_livestream {
             },
         ), creator_amount)?;
 
-        // Fee to platform
+        // 2% staking
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.staking_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), staking_amount)?;
+
+        // 0.5% gas reserve
+        token::transfer(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                to: ctx.accounts.gas_reserve_pool.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), gas_amount)?;
+
+        // 0.5% ops
         token::transfer(CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -388,7 +535,17 @@ pub mod aura_livestream {
                 to: ctx.accounts.platform_treasury.to_account_info(),
                 authority: ctx.accounts.fan.to_account_info(),
             },
-        ), fee)?;
+        ), ops_amount)?;
+
+        // 2% burn
+        token::burn(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Burn {
+                mint: ctx.accounts.ora_mint.to_account_info(),
+                from: ctx.accounts.fan_token_account.to_account_info(),
+                authority: ctx.accounts.fan.to_account_info(),
+            },
+        ), burn_amount)?;
 
         // Record access
         let ppv_key = ctx.accounts.ppv_event.key();
@@ -593,7 +750,11 @@ pub struct TipStreamer<'info> {
     #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
     pub staking_pool: Account<'info, TokenAccount>,
 
-    /// [audit fix C-L1] hardcoded protocol platform treasury.
+    /// [whitepaper-sync v1.1] hardcoded protocol gas-reserve pool (0.5% leg).
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
+    pub gas_reserve_pool: Account<'info, TokenAccount>,
+
+    /// [audit fix C-L1] hardcoded protocol platform treasury (now ops leg).
     #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
 
@@ -639,9 +800,21 @@ pub struct SubscribeToCreator<'info> {
     )]
     pub creator_token_account: Account<'info, TokenAccount>,
 
-    /// [audit fix C-L2] hardcoded platform treasury.
+    /// [whitepaper-sync v1.1] hardcoded protocol staking-rewards pool (2% leg).
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
+    pub staking_pool: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] hardcoded protocol gas-reserve pool (0.5% leg).
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
+    pub gas_reserve_pool: Account<'info, TokenAccount>,
+
+    /// [audit fix C-L2] hardcoded platform treasury (now 0.5% ops leg).
     #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] canonical ORA mint for burning the 2% leg.
+    #[account(mut, address = ORA_MINT @ ErrorCode::Unauthorized)]
+    pub ora_mint: Account<'info, Mint>,
 
     /// CHECK: creator pubkey — used as a seed AND to bind the creator_token_account.
     pub creator: UncheckedAccount<'info>,
@@ -715,8 +888,21 @@ pub struct RenewSubscription<'info> {
     )]
     pub creator_token_account: Account<'info, TokenAccount>,
 
+    /// [whitepaper-sync v1.1] hardcoded protocol staking-rewards pool (2% leg).
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
+    pub staking_pool: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] hardcoded protocol gas-reserve pool (0.5% leg).
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
+    pub gas_reserve_pool: Account<'info, TokenAccount>,
+
+    /// 0.5% ops leg.
     #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] canonical ORA mint for burning the 2% leg.
+    #[account(mut, address = ORA_MINT @ ErrorCode::Unauthorized)]
+    pub ora_mint: Account<'info, Mint>,
 
     /// CHECK: creator pubkey (matches subscription.creator + token-account owner).
     pub creator: UncheckedAccount<'info>,
@@ -781,8 +967,21 @@ pub struct PurchasePPV<'info> {
     )]
     pub creator_token_account: Account<'info, TokenAccount>,
 
+    /// [whitepaper-sync v1.1] hardcoded protocol staking-rewards pool (2% leg).
+    #[account(mut, address = STAKING_REWARDS_POOL @ ErrorCode::Unauthorized)]
+    pub staking_pool: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] hardcoded protocol gas-reserve pool (0.5% leg).
+    #[account(mut, address = GAS_RESERVE_POOL @ ErrorCode::Unauthorized)]
+    pub gas_reserve_pool: Account<'info, TokenAccount>,
+
+    /// 0.5% ops leg.
     #[account(mut, address = PLATFORM_TREASURY @ ErrorCode::Unauthorized)]
     pub platform_treasury: Account<'info, TokenAccount>,
+
+    /// [whitepaper-sync v1.1] canonical ORA mint for burning the 2% leg.
+    #[account(mut, address = ORA_MINT @ ErrorCode::Unauthorized)]
+    pub ora_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub fan: Signer<'info>,

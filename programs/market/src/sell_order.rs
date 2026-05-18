@@ -1,6 +1,11 @@
 use anchor_lang::prelude::*;
 
-/// 5% fee: 200 bps burn + 200 bps staking + 50 bps gas + 50 bps ops
+/// [whitepaper-sync v1.1] verified — 5% fee = 2%/2%/0.5%/0.5%, matches
+/// Whitepaper v1.1 §5.7 and Numbers Handbook §5 (40/40/10/10 of the 5% fee).
+/// `market/lib.rs` (sell_order::fill_order + buy_order::fill_order),
+/// `market/bounty_v2.rs::award_*` (ORA mode), and `creator-coin::fill_order`
+/// + `primary_buy` all read these constants directly. USDC bounty path
+/// (bounty_v2.rs) routes 0/4/0.5/0.5 since USDC cannot be burned.
 pub const FEE_BPS: u64 = 500;
 pub const BURN_BPS: u64 = 200;
 pub const STAKING_BPS: u64 = 200;

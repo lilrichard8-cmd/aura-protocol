@@ -3,7 +3,7 @@
  *
  * Wraps the `aura_staking` program (programs/staking/src/lib.rs):
  *   - initialize_staking_pool
- *   - stake_ora                (with LockupTier: 1d / 30d / 90d / 180d)
+ *   - stake_ora                (with LockupTier: 1mo / 3mo / 6mo / 12mo)  [audit fix R5 H-S-1]
  *   - unstake_ora              (20% penalty when early)
  *   - claim_staking_reward
  *   - update_daily_rewards     (authority only)
@@ -47,18 +47,26 @@ export const STAKING_SEEDS = {
 } as const;
 
 /** Lockup tiers and their (days, multiplier_bps) — matches LockupTier::params(). */
+// [audit fix R5 H-S-1] WP v1.1 §14 + Numbers Handbook §14: 1mo / 3mo / 6mo /
+// 12mo with multipliers 1.0/1.0/1.5/2.0. SDK enum mirrors the on-chain Rust
+// enum exactly; ordinal index is the Anchor discriminant.
 export enum LockupTier {
-  OneDay = 0,
-  ThirtyDays = 1,
-  NinetyDays = 2,
-  OneEightyDays = 3,
+  OneMonth = 0,
+  ThreeMonths = 1,
+  SixMonths = 2,
+  TwelveMonths = 3,
 }
 
+// [audit fix R5 H-S-1] Whitepaper v1.1 §14.3 + Numbers Handbook §14 specify
+// 1mo=1.0x / 3mo=1.0x / 6mo=1.5x / 12mo=2.0x. Previous tiers (1d / 30d /
+// 90d / 180d) were a Phase-0 placeholder; the 12-month tier was missing and
+// the 1-day tier had no WP basis. SDK matches programs/staking/src/lib.rs
+// in lockstep.
 export const LOCKUP_PARAMS: Record<LockupTier, { days: number; multiplierBps: number }> = {
-  [LockupTier.OneDay]:        { days: 1,   multiplierBps: 10_000 }, // 1.00x
-  [LockupTier.ThirtyDays]:    { days: 30,  multiplierBps: 12_500 }, // 1.25x
-  [LockupTier.NinetyDays]:    { days: 90,  multiplierBps: 17_500 }, // 1.75x
-  [LockupTier.OneEightyDays]: { days: 180, multiplierBps: 25_000 }, // 2.50x
+  [LockupTier.OneMonth]:     { days: 30,  multiplierBps: 10_000 }, // 1.00x
+  [LockupTier.ThreeMonths]:  { days: 90,  multiplierBps: 10_000 }, // 1.00x
+  [LockupTier.SixMonths]:    { days: 180, multiplierBps: 15_000 }, // 1.50x
+  [LockupTier.TwelveMonths]: { days: 360, multiplierBps: 20_000 }, // 2.00x
 };
 
 /** Early unstake penalty (20%). */

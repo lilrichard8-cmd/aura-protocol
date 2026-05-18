@@ -1,3 +1,15 @@
+// [whitepaper-sync v1.1] verified — sell_order::fill_order and
+// buy_order::fill_order route the 5% fee through sell_order::{BURN, STAKING,
+// GAS, OPS}_BPS = 200/200/50/50, matching Whitepaper v1.1 §5.7 (2% burn /
+// 2% staking / 0.5% gas / 0.5% ops) and Numbers Handbook §5. Creator-coin
+// secondary-trade pay path (`creator-coin::fill_order`) is fee-bearing in
+// ORA; the same-CC fee-free path described in WP §5.7 ("if a fan pays a
+// creator with the creator's own Creator Coin, the creator receives 100%")
+// is implemented as the consumable-benefit redemption path
+// (`creator-coin::initiate_redemption` → `confirm_receipt`): the buyer
+// transfers CC into escrow at `cost`, the creator receives the full `cost`
+// of CC on confirmation, no fee assessed. The 5% Creator Coin secondary-sale
+// fee was already collected at issuance (`primary_buy`).
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
 
@@ -5,11 +17,14 @@ pub mod sell_order;
 pub mod buy_order;
 pub mod bounty_v2;
 pub mod bounty_v2_ix;
+// [whitepaper-sync v1.1] §12 NFT Royalty enforcement (see royalty.rs).
+pub mod royalty;
 
 pub use sell_order::*;
 pub use buy_order::*;
 pub use bounty_v2::*;
 pub use bounty_v2_ix::*;
+pub use royalty::*;
 
 declare_id!("5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV");
 
@@ -465,6 +480,30 @@ pub mod aura_market {
     }
     pub fn bv2_refund_expired(ctx: Context<RefundExpiredCtx>) -> Result<()> {
         bounty_v2_ix::refund_expired(ctx)
+    }
+
+    // ===== NFT Royalties (Whitepaper v1.1 §12) =====
+    // [whitepaper-sync v1.1] §12 — protocol-level creator royalty
+    // enforcement layered on top of Metaplex pNFT. See royalty.rs for the
+    // full WP §12 mapping (min 5% / max 45% / default 5%) and the WP §5.7
+    // protocol-fee split (40/40/10/10 of 5%).
+    //
+    // Existing CC trade paths (fill_sell_order / fill_buy_order) are NOT
+    // modified — they operate on Creator Coins, not NFTs, and applying NFT
+    // royalties to fungible CC trades would be semantically wrong and
+    // would break the audited 5% fee split. NFT sale flows that want
+    // royalty enforcement should call `enforce_royalty_on_sale` (or its
+    // CPI equivalent) from their own settlement instruction.
+
+    pub fn set_royalty(ctx: Context<SetRoyaltyCtx>, royalty_bps: u16) -> Result<()> {
+        royalty::set_royalty(ctx, royalty_bps)
+    }
+
+    pub fn enforce_royalty_on_sale(
+        ctx: Context<EnforceRoyaltyOnSaleCtx>,
+        sale_price: u64,
+    ) -> Result<()> {
+        royalty::enforce_royalty_on_sale(ctx, sale_price)
     }
 }
 

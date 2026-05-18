@@ -25,17 +25,17 @@ describe('aura-sdk StakingModule', () => {
     it('EARLY_UNSTAKE_PENALTY_BPS = 2000 (20%)', () =>
       assert.equal(EARLY_UNSTAKE_PENALTY_BPS, 2_000));
 
-    it('4 lockup tiers configured', () => {
-      assert.ok(LOCKUP_PARAMS[LockupTier.OneDay]);
-      assert.ok(LOCKUP_PARAMS[LockupTier.ThirtyDays]);
-      assert.ok(LOCKUP_PARAMS[LockupTier.NinetyDays]);
-      assert.ok(LOCKUP_PARAMS[LockupTier.OneEightyDays]);
+    it('4 lockup tiers configured (1mo/3mo/6mo/12mo) [audit fix R5 H-S-1]', () => {
+      assert.ok(LOCKUP_PARAMS[LockupTier.OneMonth]);
+      assert.ok(LOCKUP_PARAMS[LockupTier.ThreeMonths]);
+      assert.ok(LOCKUP_PARAMS[LockupTier.SixMonths]);
+      assert.ok(LOCKUP_PARAMS[LockupTier.TwelveMonths]);
     });
 
     it('longer lockups have higher multipliers', () => {
-      const m1 = LOCKUP_PARAMS[LockupTier.OneDay].multiplierBps;
-      const m180 = LOCKUP_PARAMS[LockupTier.OneEightyDays].multiplierBps;
-      assert.isAbove(m180, m1);
+      const m1 = LOCKUP_PARAMS[LockupTier.OneMonth].multiplierBps;
+      const m12 = LOCKUP_PARAMS[LockupTier.TwelveMonths].multiplierBps;
+      assert.isAbove(m12, m1);
     });
   });
 

@@ -72,6 +72,16 @@ export enum ProposalType {
   Other = 4,
 }
 
+// [whitepaper-sync v1.1] Governance tier per Numbers Handbook §14 +
+// Whitepaper §15/§19. Discriminant order MUST match
+// programs/governance/src/lib.rs::ProposalTier.
+export enum ProposalTier {
+  TierI = 0,    // Constitutional / immutable (rejected on create)
+  TierII = 1,   // 75% supermajority
+  TierIII = 2,  // 50% standard majority
+  TierIV = 3,   // Committee-internal (treated as 50% on-chain)
+}
+
 export enum ProposalStatus {
   UnderReview = 0,
   Voting = 1,
@@ -236,6 +246,9 @@ export interface CreateProposalParams {
   description: string;
   committeeType: CommitteeType;
   proposalType: ProposalType;
+  // [whitepaper-sync v1.1] Governance tier. TierI is rejected on-chain;
+  // callers must use TierII / TierIII / TierIV.
+  tier: ProposalTier;
 }
 
 export interface VoteOnProposalParams {
@@ -366,12 +379,15 @@ export class GovernanceModule {
 
     const cfg = this.pdas.governanceConfig();
     const proposalPda = this.pdas.proposal(proposer, params.title);
+    // [whitepaper-sync v1.1] +1 byte tier discriminant appended after
+    // proposal_type.
     const data = Buffer.concat([
       ixDiscriminator('create_proposal'),
       borshString(params.title),
       borshString(params.description),
       u8(params.committeeType),
       u8(params.proposalType),
+      u8(params.tier),
     ]);
     const ix = new TransactionInstruction({
       programId: this.programId,

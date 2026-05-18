@@ -14,7 +14,9 @@ members = [
     "programs/rewards",
     "programs/staking",
     "programs/livestream",
-    "programs/type-b"
+    "programs/type-b",
+    "programs/content-keys",
+    "programs/launch-incentives"
 ]
 
 [profile.release]

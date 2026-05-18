@@ -10,9 +10,115 @@ use rewards::{self, RewardState};
 declare_id!("Dq6fFo2yjSuiGPhc1hwDocKhEpsSam2X8PbzbhVzTHxN");
 
 const ORA_DECIMALS: u8 = 9;
-const INITIAL_SUPPLY: u64 = 1_050_000_000 * 1_000_000_000; // 1.05B with 9 decimals
-const MAU_GROWTH_MINT_PER_10K: u64 = 500_000 * 1_000_000_000; // 500k ORA per 10k MAU
+// [whitepaper-sync v1.1] INITIAL_SUPPLY synced to Whitepaper v1.1 §5.2 /
+// Numbers Handbook §1: 1.1B ORA (was 1.05B in pre-v1.1 contract). Affects
+// every downstream allocation %.
+const INITIAL_SUPPLY: u64 = 1_100_000_000 * 1_000_000_000; // 1.1B with 9 decimals
+// [whitepaper-sync v1.1] MAU_GROWTH_MINT_PER_10K synced to Whitepaper v1.1
+// §5.10 / Numbers Handbook §3: 100k ORA per 10k MAU (was 500k — 5x too high).
+// Cap remains at 75M total per audit/protocol guidance.
+const MAU_GROWTH_MINT_PER_10K: u64 = 100_000 * 1_000_000_000; // 100k ORA per 10k MAU (WP §5.10)
 const MAU_GROWTH_MINT_CAP: u64 = 75_000_000 * 1_000_000_000; // 75M ORA cap
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.2 Initial Supply Allocation (1.1B)
+//
+// These constants are documentation/safety constants. Distribution to the
+// individual buckets is performed off-chain (bucket multisigs / treasuries),
+// but we surface the named amounts here so any future on-chain allocator
+// can reference a single source of truth, and so the compile-time sum
+// check below catches drift.
+//
+// Numbers Handbook §2:
+//   Team                  150M  (Søren 50M / Iris 30M / Future 70M)
+//   Community Incentives  500M  (managed by rewards program — see TOTAL_INCENTIVE_POOL)
+//   Ecosystem DAO         200M
+//   Launch Incentives     150M  (Million Plan 50M / Onboarding 50M / Rising Star 50M)
+//   Liquidity & Bootstrap 100M
+// ──────────────────────────────────────────────────────────────────────
+pub const ALLOCATION_TEAM: u64 = 150_000_000 * 1_000_000_000;
+pub const ALLOCATION_TEAM_SOREN: u64 = 50_000_000 * 1_000_000_000;
+pub const ALLOCATION_TEAM_IRIS: u64 = 30_000_000 * 1_000_000_000;
+pub const ALLOCATION_TEAM_FUTURE: u64 = 70_000_000 * 1_000_000_000;
+pub const ALLOCATION_COMMUNITY: u64 = 500_000_000 * 1_000_000_000;
+pub const ALLOCATION_ECOSYSTEM: u64 = 200_000_000 * 1_000_000_000;
+pub const ALLOCATION_LAUNCH_INCENTIVES: u64 = 150_000_000 * 1_000_000_000;
+pub const ALLOCATION_LIQUIDITY: u64 = 100_000_000 * 1_000_000_000;
+
+// Compile-time sum checks. If any individual constant drifts, the build
+// fails — preventing silent allocation-math regressions.
+const _: () = {
+    // Team sub-buckets sum to ALLOCATION_TEAM.
+    assert!(
+        ALLOCATION_TEAM_SOREN + ALLOCATION_TEAM_IRIS + ALLOCATION_TEAM_FUTURE
+            == ALLOCATION_TEAM,
+        "[whitepaper-sync v1.1] Team sub-buckets must sum to ALLOCATION_TEAM (150M)"
+    );
+    // All buckets sum to INITIAL_SUPPLY.
+    assert!(
+        ALLOCATION_TEAM
+            + ALLOCATION_COMMUNITY
+            + ALLOCATION_ECOSYSTEM
+            + ALLOCATION_LAUNCH_INCENTIVES
+            + ALLOCATION_LIQUIDITY
+            == INITIAL_SUPPLY,
+        "[whitepaper-sync v1.1] Allocation buckets must sum to INITIAL_SUPPLY (1.1B)"
+    );
+};
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.5 Management Performance Pool
+//
+// 30M ORA / year × max 3 years = up to 90M ORA total. Independent of the
+// 1.1B initial supply (this is an above-the-cap mint, gated to
+// PROGRAM_ADMIN, year-bounded, and rate-limited to one approval per year).
+// Unused tranches are forfeit by simply not approving (no on-chain burn
+// required).
+// ──────────────────────────────────────────────────────────────────────
+pub const PERF_POOL_ANNUAL_BUDGET: u64 = 30_000_000 * 1_000_000_000;
+pub const PERF_POOL_MAX_YEARS: u8 = 3;
+pub const PERF_POOL_MAX_TOTAL: u64 = 90_000_000 * 1_000_000_000;
+const _: () = assert!(
+    (PERF_POOL_MAX_YEARS as u64) * PERF_POOL_ANNUAL_BUDGET == PERF_POOL_MAX_TOTAL,
+    "[whitepaper-sync v1.1] PERF_POOL_MAX_TOTAL must equal PERF_POOL_MAX_YEARS * PERF_POOL_ANNUAL_BUDGET"
+);
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §5.8 Perpetual Annual Emission Schedule
+//
+// Whitepaper §5.8 / Handbook §3:
+//   Y1 = 5% of current total supply
+//   Y2 = 4%
+//   Y3 = 3%
+//   Y4+ = 2% (permanent floor)
+// Split: 80% to creator-rewards pool destination, 20% to Ecosystem DAO.
+// Tier I immutable: cannot be changed by governance.
+// ──────────────────────────────────────────────────────────────────────
+pub const ANNUAL_EMISSION_Y1_BPS: u16 = 500;   // 5%
+pub const ANNUAL_EMISSION_Y2_BPS: u16 = 400;   // 4%
+pub const ANNUAL_EMISSION_Y3_BPS: u16 = 300;   // 3%
+pub const ANNUAL_EMISSION_FLOOR_BPS: u16 = 200; // 2% Y4+ permanent floor
+pub const ANNUAL_EMISSION_CREATOR_SHARE_BPS: u16 = 8000; // 80% to creator rewards pool
+pub const ANNUAL_EMISSION_DAO_SHARE_BPS: u16 = 2000;     // 20% to Ecosystem DAO
+const _: () = assert!(
+    ANNUAL_EMISSION_CREATOR_SHARE_BPS + ANNUAL_EMISSION_DAO_SHARE_BPS == 10_000,
+    "[whitepaper-sync v1.1] annual emission creator/DAO shares must sum to 10000 bps"
+);
+
+/// Approximate seconds in one year. Used for rate-limiting `annual_emission_mint`
+/// and bounding the Y1 emergency authority window.
+pub const SECONDS_PER_YEAR: i64 = 365 * 24 * 60 * 60;
+
+// ──────────────────────────────────────────────────────────────────────
+// [whitepaper-sync v1.1] §3 Storage Emission framework (Handbook §7)
+//
+// Per-trigger cap: 3% of total supply (Tier I, immutable).
+// Y1 emergency authority: single mint up to 1% of supply, auto-expires Y2.
+// The actual storage-emission instruction is not in scope for this sync
+// batch — we add the framework constants and the Y1 emergency-mint guard.
+// ──────────────────────────────────────────────────────────────────────
+pub const STORAGE_EMISSION_TRIGGER_CAP_BPS: u16 = 300; // 3% per trigger
+pub const Y1_EMERGENCY_AUTHORITY_BPS: u16 = 100;       // 1% Y1 single mint
 /// [audit fix E.M-1] Burn-floor numerator/denominator. The floor is computed
 /// dynamically as `BURN_FLOOR_BPS * total_ever_minted / 10000`, so as the MAU
 /// growth path adds new supply the floor scales with it. Previously the floor
@@ -24,7 +130,8 @@ pub const BURN_FLOOR_BPS: u64 = 3000; // 30% in bps
 /// `total_ever_minted` is somehow zero (pre-init bootstrap) we still refuse to
 /// burn below 30% of the documented initial supply, matching the original
 /// constant. This is the safety net the auditor recommended.
-const BURN_FLOOR_MIN: u64 = 315_000_000 * 1_000_000_000; // 30% of 1.05B
+/// [whitepaper-sync v1.1] rescaled to 30% of 1.1B = 330M.
+const BURN_FLOOR_MIN: u64 = 330_000_000 * 1_000_000_000; // 30% of 1.1B
 
 /// [audit fix E.M-1] Dynamic burn floor: 30% of `total_ever_minted`, clamped
 /// at minimum to the original 315M figure (30% of INITIAL_SUPPLY). This makes
@@ -42,6 +149,13 @@ fn dynamic_burn_floor(total_ever_minted: u64) -> u64 {
 pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const OFFICIAL_STAKING_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
 pub const OFFICIAL_PLATFORM: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [audit fix R5 H-O-1] / [whitepaper-sync v1.1] §5.7 fee split correction —
+// process_fee now needs the gas-reserve and ops-treasury destinations to match
+// the 40/40/10/10 split shared with content-keys / market / livestream /
+// creator-coin. Placeholders here mirror the other programs; replace with real
+// multisig-controlled ATAs before mainnet deploy.
+pub const OFFICIAL_GAS_RESERVE: Pubkey = anchor_lang::solana_program::system_program::ID;
+pub const OFFICIAL_OPS_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
 // [audit fix round2 E2.H-2] Hardcoded growth-reserve destination. Without this
 // binding the authority could mint up to 75M ORA via mau_growth_mint to any
 // arbitrary token account. ⚠️ DO NOT DEPLOY — placeholder; replace with the
@@ -74,12 +188,20 @@ pub mod aura_ora {
         config.current_mau = 0;
         config.last_mau_checkpoint = 0;
         config.bump = ctx.bumps.ora_config;
+        // initial_supply_minted defaults to false; total_ever_minted defaults to 0
+        // (Anchor zeroes the account at init).
+
+        // [whitepaper-sync v1.1] anchor program start time — used to bound
+        // the Y1 emergency-mint authority window. All other v1.1 trackers
+        // default to zero/false.
+        config.program_init_ts = Clock::get()?.unix_timestamp;
 
         msg!("ORA initialized: mint created, call mint_initial_supply next");
         Ok(())
     }
 
-    /// Mint the initial 1.05B supply to the authority's token account.
+    /// Mint the initial 1.1B supply to the authority's token account.
+    /// [whitepaper-sync v1.1] re-synced to Whitepaper v1.1 §5.2 (was 1.05B).
     /// Must be called after initialize_ora and after creating a token account for the ORA mint.
     /// [audit fix E-C-5] Replay-protected via `initial_supply_minted` flag; can only run once.
     /// [audit fix round2 E2.H-1] cap check added: bootstrap ordering where
@@ -137,7 +259,8 @@ pub mod aura_ora {
         );
         rewards::cpi::mint_for_initial_supply(cpi_ctx, INITIAL_SUPPLY)?;
 
-        msg!("ORA initial supply minted: 1.05B tokens (cumulative {})", new_total);
+        // [whitepaper-sync v1.1] message updated to reflect 1.1B initial supply
+        msg!("ORA initial supply minted: 1.1B tokens (cumulative {})", new_total);
         Ok(())
     }
 
@@ -409,14 +532,27 @@ pub mod aura_ora {
         Ok(())
     }
 
-    /// Unified 5% fee handler: 2.5% burn + 2% staking rewards + 0.5% platform
+    /// [audit fix R5 H-O-1] / [whitepaper-sync v1.1] §5.7 fee split correction —
+    /// Unified 5% fee handler with the WP-v1.1 / Handbook §5 split:
+    ///   2% burn + 2% staking rewards + 0.5% gas reserve + 0.5% ops treasury
+    /// (= 40/40/10/10 of the 5% protocol fee). Previously this handler shipped
+    /// the pre-v1.1 50/40/10 split which was missed during the wp-sync batches;
+    /// content-keys / market / livestream / creator-coin already use 40/40/10/10.
     pub fn process_fee(ctx: Context<ProcessFee>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
+        // 5% protocol fee
         let fee = amount.checked_mul(5).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 5%
-        let burn_portion = fee.checked_mul(50).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2.5% of total = 50% of fee
+        // [audit fix R5 H-O-1] 40/40/10/10 split — was 50/40/10
+        let burn_portion    = fee.checked_mul(40).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2% of total = 40% of fee
         let staking_portion = fee.checked_mul(40).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 2% of total = 40% of fee
-        let platform_portion = fee.checked_sub(burn_portion).ok_or(ErrorCode::Overflow)?.checked_sub(staking_portion).ok_or(ErrorCode::Overflow)?; // 0.5%
+        let gas_portion     = fee.checked_mul(10).ok_or(ErrorCode::Overflow)?.checked_div(100).ok_or(ErrorCode::Overflow)?; // 0.5% of total = 10% of fee
+        // Ops portion = residual (carries any rounding dust) — matches
+        // content-keys / livestream / creator-coin residual pattern.
+        let ops_portion = fee
+            .checked_sub(burn_portion).ok_or(ErrorCode::Overflow)?
+            .checked_sub(staking_portion).ok_or(ErrorCode::Overflow)?
+            .checked_sub(gas_portion).ok_or(ErrorCode::Overflow)?; // 0.5%
 
         // Burn portion (with burn floor check)
         // [audit fix E.M-1] dynamic burn floor
@@ -455,18 +591,33 @@ pub mod aura_ora {
             )?;
         }
 
-        // Transfer platform portion
-        if platform_portion > 0 {
+        // [audit fix R5 H-O-1] Transfer gas reserve portion
+        if gas_portion > 0 {
             token::transfer(
                 CpiContext::new(
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.fee_source_account.to_account_info(),
-                        to: ctx.accounts.platform_account.to_account_info(),
+                        to: ctx.accounts.gas_reserve_account.to_account_info(),
                         authority: ctx.accounts.payer.to_account_info(),
                     },
                 ),
-                platform_portion,
+                gas_portion,
+            )?;
+        }
+
+        // [audit fix R5 H-O-1] Transfer ops treasury portion (was "platform")
+        if ops_portion > 0 {
+            token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.fee_source_account.to_account_info(),
+                        to: ctx.accounts.ops_treasury_account.to_account_info(),
+                        authority: ctx.accounts.payer.to_account_info(),
+                    },
+                ),
+                ops_portion,
             )?;
         }
 
@@ -477,11 +628,24 @@ pub mod aura_ora {
             .checked_add(actual_burn_portion)
             .ok_or(ErrorCode::Overflow)?;
 
-        msg!("Fee processed: {} total, burn={}, staking={}, platform={}", fee, burn_portion, staking_portion, platform_portion);
+        // [audit fix R5 H-O-1] emit 4-way fee breakdown for off-chain accounting
+        emit!(FeeProcessedEvent {
+            fee_total: fee,
+            burn: actual_burn_portion,
+            staking: staking_portion,
+            gas: gas_portion,
+            ops: ops_portion,
+        });
+        msg!(
+            "Fee processed: {} total, burn={}, staking={}, gas={}, ops={}",
+            fee, burn_portion, staking_portion, gas_portion, ops_portion
+        );
         Ok(())
     }
 
-    /// MAU growth mint: per 10k new MAU → +500k ORA minted, cap 75M total
+    /// MAU growth mint: per 10k new MAU → +100k ORA minted, cap 75M total.
+    /// [whitepaper-sync v1.1] synced to Whitepaper v1.1 §5.10 / Handbook §3
+    /// (was 500k per 10k MAU; corrected to 100k).
     /// [audit fix E-H-3] when actual_mint is zero (cap exhausted or sub-10k tick),
     /// we now reject the call instead of silently advancing the MAU counter, so the
     /// off-chain caller cannot "burn" growth ticks without ever crediting tokens.
@@ -570,6 +734,270 @@ pub mod aura_ora {
         msg!("MAU growth mint: {} ORA for {} new MAU (total minted: {})", actual_mint, mau_increase, config.mau_growth_minted);
         Ok(())
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // [whitepaper-sync v1.1] §5.5 Management Performance Pool
+    //
+    // `request_performance_pool(year, amount)` mints up to
+    // `PERF_POOL_ANNUAL_BUDGET` ORA per year, capped at `PERF_POOL_MAX_YEARS`
+    // (3 years) and `PERF_POOL_MAX_TOTAL` (90M) cumulative. Gated to
+    // PROGRAM_ADMIN. Each (year_index) tranche is one-shot via the year
+    // bitmap; year-end unused tranches are forfeit by simply not approving.
+    //
+    // This is an above-the-cap mint (independent of INITIAL_SUPPLY + MAU
+    // growth budget) per Handbook §5. We deliberately do NOT add it to
+    // `total_ever_minted` (which gates initial + growth supply).
+    // ──────────────────────────────────────────────────────────────────────
+    pub fn request_performance_pool(
+        ctx: Context<RequestPerformancePool>,
+        year_index: u8,
+        amount: u64,
+    ) -> Result<()> {
+        // year_index is 1-indexed (1, 2, 3)
+        require!(year_index >= 1 && year_index <= PERF_POOL_MAX_YEARS, ErrorCode::PerfPoolInvalidYear);
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require!(amount <= PERF_POOL_ANNUAL_BUDGET, ErrorCode::PerfPoolBudgetExceeded);
+
+        let cfg = &ctx.accounts.ora_config;
+        let bit = 1u8 << (year_index - 1);
+        require!(
+            (cfg.perf_pool_year_approved_bitmap & bit) == 0,
+            ErrorCode::PerfPoolYearAlreadyApproved
+        );
+
+        let new_total = cfg
+            .perf_pool_total_approved
+            .checked_add(amount)
+            .ok_or(ErrorCode::Overflow)?;
+        require!(new_total <= PERF_POOL_MAX_TOTAL, ErrorCode::PerfPoolBudgetExceeded);
+
+        let config_bump = cfg.bump;
+
+        // Persist before CPI (re-entrancy defense).
+        {
+            let cfg = &mut ctx.accounts.ora_config;
+            cfg.perf_pool_total_approved = new_total;
+            cfg.perf_pool_last_year_approved = year_index;
+            cfg.perf_pool_year_approved_bitmap |= bit;
+        }
+
+        // CPI into rewards::mint_for_ora (purpose=0 AdHoc; perf pool mints
+        // go to PROGRAM_ADMIN-controlled destination via the caller-chosen
+        // recipient_token_account, mint-bound to ORA).
+        let ora_config_seeds: &[&[u8]] = &[b"ora_config".as_ref(), &[config_bump]];
+        let signer_seeds = &[ora_config_seeds];
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.rewards_program.to_account_info(),
+            RewardsMintForOra {
+                reward_state: ctx.accounts.reward_state.to_account_info(),
+                ora_mint: ctx.accounts.ora_mint.to_account_info(),
+                destination_token_account: ctx.accounts.perf_pool_destination.to_account_info(),
+                caller_ora_config: ctx.accounts.ora_config.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+            signer_seeds,
+        );
+        rewards::cpi::mint_for_ora(cpi_ctx, amount, 0u8)?;
+
+        msg!(
+            "[whitepaper-sync v1.1] Performance Pool mint: year={} amount={} cumulative={}",
+            year_index, amount, new_total
+        );
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // [whitepaper-sync v1.1] §5.8 Annual Perpetual Emission
+    //
+    // `annual_emission_mint(year_index)` mints the perpetual emission for
+    // the given protocol year:
+    //   Y1 = 5% of current_supply
+    //   Y2 = 4%
+    //   Y3 = 3%
+    //   Y4+ = 2% (permanent floor)
+    // Split 80% to creator-rewards pool destination / 20% to Ecosystem DAO.
+    //
+    // Rate-limited to one call per year via a year bitmap and a
+    // `SECONDS_PER_YEAR` minimum delta against `annual_emission_last_ts`.
+    // Gated to PROGRAM_ADMIN. Above-the-cap mint, not counted in
+    // `total_ever_minted`.
+    // ──────────────────────────────────────────────────────────────────────
+    pub fn annual_emission_mint(
+        ctx: Context<AnnualEmissionMint>,
+        year_index: u16,
+    ) -> Result<()> {
+        require!(year_index >= 1 && year_index <= 16, ErrorCode::AnnualEmissionInvalidYear);
+
+        let cfg = &ctx.accounts.ora_config;
+        let bit = 1u16 << (year_index - 1);
+        require!(
+            (cfg.annual_emission_year_bitmap & bit) == 0,
+            ErrorCode::AnnualEmissionYearAlreadyEmitted
+        );
+
+        // Determine the emission rate for the requested year.
+        let emission_bps: u16 = match year_index {
+            1 => ANNUAL_EMISSION_Y1_BPS,
+            2 => ANNUAL_EMISSION_Y2_BPS,
+            3 => ANNUAL_EMISSION_Y3_BPS,
+            _ => ANNUAL_EMISSION_FLOOR_BPS,
+        };
+
+        // Rate-limit: at least ~1 year since the last successful emission.
+        // Year 1 is allowed at any time after init; subsequent years require
+        // the time delta.
+        let now = Clock::get()?.unix_timestamp;
+        if cfg.annual_emission_last_ts > 0 {
+            require!(
+                now.saturating_sub(cfg.annual_emission_last_ts) >= SECONDS_PER_YEAR,
+                ErrorCode::AnnualEmissionTooSoon
+            );
+        }
+
+        // Compute mint amount against current_supply (ora_mint.supply).
+        let current_supply = ctx.accounts.ora_mint.supply as u128;
+        let total_emission_amount: u64 = current_supply
+            .checked_mul(emission_bps as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(10_000)
+            .ok_or(ErrorCode::Overflow)?
+            .try_into()
+            .map_err(|_| ErrorCode::Overflow)?;
+        require!(total_emission_amount > 0, ErrorCode::InvalidAmount);
+
+        // 80% creator-rewards pool / 20% Ecosystem DAO
+        let creator_amount: u64 = (total_emission_amount as u128)
+            .checked_mul(ANNUAL_EMISSION_CREATOR_SHARE_BPS as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(10_000)
+            .ok_or(ErrorCode::Overflow)?
+            .try_into()
+            .map_err(|_| ErrorCode::Overflow)?;
+        let dao_amount = total_emission_amount
+            .checked_sub(creator_amount)
+            .ok_or(ErrorCode::Overflow)?;
+
+        let config_bump = cfg.bump;
+        let new_cum = cfg
+            .annual_emission_total
+            .checked_add(total_emission_amount)
+            .ok_or(ErrorCode::Overflow)?;
+
+        // Persist BEFORE CPIs (re-entrancy defense).
+        {
+            let cfg = &mut ctx.accounts.ora_config;
+            cfg.annual_emission_year_bitmap |= bit;
+            cfg.annual_emission_last_ts = now;
+            cfg.annual_emission_total = new_cum;
+        }
+
+        let ora_config_seeds: &[&[u8]] = &[b"ora_config".as_ref(), &[config_bump]];
+        let signer_seeds = &[ora_config_seeds];
+
+        // 1) 80% to creator rewards destination
+        if creator_amount > 0 {
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.rewards_program.to_account_info(),
+                RewardsMintForOra {
+                    reward_state: ctx.accounts.reward_state.to_account_info(),
+                    ora_mint: ctx.accounts.ora_mint.to_account_info(),
+                    destination_token_account: ctx
+                        .accounts
+                        .creator_rewards_destination
+                        .to_account_info(),
+                    caller_ora_config: ctx.accounts.ora_config.to_account_info(),
+                    token_program: ctx.accounts.token_program.to_account_info(),
+                },
+                signer_seeds,
+            );
+            rewards::cpi::mint_for_ora(cpi_ctx, creator_amount, 0u8)?;
+        }
+
+        // 2) 20% to Ecosystem DAO destination
+        if dao_amount > 0 {
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.rewards_program.to_account_info(),
+                RewardsMintForOra {
+                    reward_state: ctx.accounts.reward_state.to_account_info(),
+                    ora_mint: ctx.accounts.ora_mint.to_account_info(),
+                    destination_token_account: ctx.accounts.dao_destination.to_account_info(),
+                    caller_ora_config: ctx.accounts.ora_config.to_account_info(),
+                    token_program: ctx.accounts.token_program.to_account_info(),
+                },
+                signer_seeds,
+            );
+            rewards::cpi::mint_for_ora(cpi_ctx, dao_amount, 0u8)?;
+        }
+
+        msg!(
+            "[whitepaper-sync v1.1] Annual emission Y{}: total={} (creator={} / dao={}) bps={} cumulative={}",
+            year_index, total_emission_amount, creator_amount, dao_amount, emission_bps, new_cum
+        );
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // [whitepaper-sync v1.1] §3 Y1 Emergency Mint Authority (Handbook §3)
+    //
+    // Single Y1 emergency mint up to 1% of total supply. Gated to
+    // PROGRAM_ADMIN. Auto-expires at `program_init_ts + SECONDS_PER_YEAR`.
+    // One-shot via `emergency_mint_y1_used` flag.
+    // ──────────────────────────────────────────────────────────────────────
+    pub fn emergency_mint_y1(
+        ctx: Context<EmergencyMintY1>,
+        amount: u64,
+    ) -> Result<()> {
+        let cfg = &ctx.accounts.ora_config;
+        require!(!cfg.emergency_mint_y1_used, ErrorCode::EmergencyMintAlreadyUsed);
+        require!(amount > 0, ErrorCode::InvalidAmount);
+
+        let now = Clock::get()?.unix_timestamp;
+        let deadline = cfg
+            .program_init_ts
+            .checked_add(SECONDS_PER_YEAR)
+            .ok_or(ErrorCode::Overflow)?;
+        require!(now < deadline, ErrorCode::EmergencyMintWindowExpired);
+
+        // Cap at 1% of current supply.
+        let max_amount: u64 = (ctx.accounts.ora_mint.supply as u128)
+            .checked_mul(Y1_EMERGENCY_AUTHORITY_BPS as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(10_000)
+            .ok_or(ErrorCode::Overflow)?
+            .try_into()
+            .map_err(|_| ErrorCode::Overflow)?;
+        require!(amount <= max_amount, ErrorCode::EmergencyMintCapExceeded);
+
+        let config_bump = cfg.bump;
+
+        // Persist BEFORE CPI.
+        {
+            let cfg = &mut ctx.accounts.ora_config;
+            cfg.emergency_mint_y1_used = true;
+            cfg.emergency_mint_y1_amount = amount;
+        }
+
+        let ora_config_seeds: &[&[u8]] = &[b"ora_config".as_ref(), &[config_bump]];
+        let signer_seeds = &[ora_config_seeds];
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.rewards_program.to_account_info(),
+            RewardsMintForOra {
+                reward_state: ctx.accounts.reward_state.to_account_info(),
+                ora_mint: ctx.accounts.ora_mint.to_account_info(),
+                destination_token_account: ctx.accounts.emergency_destination.to_account_info(),
+                caller_ora_config: ctx.accounts.ora_config.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+            signer_seeds,
+        );
+        rewards::cpi::mint_for_ora(cpi_ctx, amount, 0u8)?;
+
+        msg!(
+            "[whitepaper-sync v1.1] Y1 emergency mint: {} ORA (cap was {}, init+1yr deadline)",
+            amount, max_amount
+        );
+        Ok(())
+    }
 }
 
 // === Account Structures ===
@@ -587,6 +1015,18 @@ pub struct OraConfig {
     pub initial_supply_minted: bool,  // 1
     // [audit fix E-C-4] cumulative supply ever minted (initial + growth + ad-hoc)
     pub total_ever_minted: u64,       // 8
+    // [whitepaper-sync v1.1] §5.5 Performance Pool tracker.
+    pub perf_pool_total_approved: u64,   // 8 — cumulative mints approved
+    pub perf_pool_last_year_approved: u8,// 1 — last year index approved (0 = none)
+    pub perf_pool_year_approved_bitmap: u8, // 1 — bit i = year i+1 approved
+    // [whitepaper-sync v1.1] §5.8 Perpetual Annual Emission tracker.
+    pub annual_emission_last_ts: i64,    // 8 — last successful annual_emission_mint timestamp
+    pub annual_emission_year_bitmap: u16,// 2 — bit i (0..=15) marks year i+1 already emitted
+    pub annual_emission_total: u64,      // 8 — cumulative perpetual emission minted (creator + DAO portions)
+    // [whitepaper-sync v1.1] §3 Storage / Y1 emergency authority tracker.
+    pub program_init_ts: i64,            // 8 — set on initialize_ora; bounds Y1 emergency window
+    pub emergency_mint_y1_used: bool,    // 1 — Y1 1% emergency mint one-shot guard
+    pub emergency_mint_y1_amount: u64,   // 8 — amount actually minted (for audit)
 }
 
 
@@ -608,13 +1048,17 @@ pub struct RewardEvent {
     pub timestamp: i64,
 }
 
+// [audit fix R5 H-O-1] 4-way breakdown matching content-keys / livestream
+// (burn / staking / gas / ops). The legacy `platform_portion` field collapsed
+// gas + ops into one; off-chain accounting needs to see them separately to
+// match the other programs' indexers.
 #[event]
 pub struct FeeProcessedEvent {
-    pub amount: u64,
-    pub burn_portion: u64,
-    pub staking_portion: u64,
-    pub platform_portion: u64,
-    pub timestamp: i64,
+    pub fee_total: u64,
+    pub burn: u64,
+    pub staking: u64,
+    pub gas: u64,
+    pub ops: u64,
 }
 
 #[event]
@@ -630,6 +1074,11 @@ pub struct MauGrowthMintEvent {
 pub enum BurnType {
     IncentiveTax,
     TransactionFee,
+    /// [whitepaper-sync v1.1] NOTE: TypeBFeature (95% burn) does NOT appear
+    /// in Whitepaper v1.1 §5.9 "Dual Burn Mechanism". Retained here pending
+    /// review of `programs/type-b/` usage. **Verify usage before next
+    /// mainnet review** — if no consumer exercises this variant, mark for
+    /// removal in the next sync pass.
     TypeBFeature,
 }
 
@@ -638,10 +1087,21 @@ pub enum BurnType {
 #[derive(Accounts)]
 pub struct InitializeOra<'info> {
     // [audit fix E-C-4 / E-C-5] +1 (initial_supply_minted bool) +8 (total_ever_minted u64)
+    // [whitepaper-sync v1.1] +8+1+1+8+2+8+8+1+8 = 45 bytes for v1.1 trackers:
+    //   perf_pool_total_approved u64 (8)
+    //   perf_pool_last_year_approved u8 (1)
+    //   perf_pool_year_approved_bitmap u8 (1)
+    //   annual_emission_last_ts i64 (8)
+    //   annual_emission_year_bitmap u16 (2)
+    //   annual_emission_total u64 (8)
+    //   program_init_ts i64 (8)
+    //   emergency_mint_y1_used bool (1)
+    //   emergency_mint_y1_amount u64 (8)
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 32 + 8 + 8 + 8 + 8 + 1 + 1 + 8,
+        space = 8 + 32 + 32 + 8 + 8 + 8 + 8 + 1 + 1 + 8
+            + 8 + 1 + 1 + 8 + 2 + 8 + 8 + 1 + 8,
         seeds = [b"ora_config"],
         bump
     )]
@@ -885,13 +1345,33 @@ pub struct ProcessFee<'info> {
     )]
     pub staking_pool_account: Account<'info, TokenAccount>,
 
-    // [audit fix E-C-2] hardcoded platform treasury destination + mint binding
+    // [audit fix E-C-2] hardcoded platform treasury destination + mint binding.
+    // Retained as the "ops" residual destination under the new 40/40/10/10
+    // split (carries any rounding dust). [audit fix R5 H-O-1]
     #[account(
         mut,
         address = OFFICIAL_PLATFORM @ ErrorCode::Unauthorized,
         constraint = platform_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
     )]
     pub platform_account: Account<'info, TokenAccount>,
+
+    // [audit fix R5 H-O-1] gas-reserve destination, hardcoded + mint-bound.
+    // 0.5% of every protocol fee lands here under the WP v1.1 40/40/10/10 split.
+    #[account(
+        mut,
+        address = OFFICIAL_GAS_RESERVE @ ErrorCode::Unauthorized,
+        constraint = gas_reserve_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
+    pub gas_reserve_account: Account<'info, TokenAccount>,
+
+    // [audit fix R5 H-O-1] ops-treasury destination, hardcoded + mint-bound.
+    // 0.5% of every protocol fee lands here (residual carries rounding dust).
+    #[account(
+        mut,
+        address = OFFICIAL_OPS_TREASURY @ ErrorCode::Unauthorized,
+        constraint = ops_treasury_account.mint == ora_mint.key() @ ErrorCode::Unauthorized
+    )]
+    pub ops_treasury_account: Account<'info, TokenAccount>,
 
     // [audit fix E-C-2] payer must equal config.authority (admin-gated fee handler).
     // The signer is now `payer` (kept for IDL/ABI back-compat) and is checked via has_one.
@@ -938,6 +1418,137 @@ pub struct MauGrowthMint<'info> {
     pub rewards_program: Program<'info, AuraRewards>,
 }
 
+// [whitepaper-sync v1.1] §5.5 Performance Pool request context.
+//
+// Gated to PROGRAM_ADMIN. perf_pool_destination is caller-supplied (PROGRAM_ADMIN
+// chooses where the tranche lands — typically a treasury multisig ATA), but
+// the mint binding is enforced.
+#[derive(Accounts)]
+pub struct RequestPerformancePool<'info> {
+    #[account(
+        mut,
+        seeds = [b"ora_config"],
+        bump = ora_config.bump,
+        has_one = authority @ ErrorCode::Unauthorized,
+    )]
+    pub ora_config: Account<'info, OraConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"ora_mint"],
+        bump
+    )]
+    pub ora_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = perf_pool_destination.mint == ora_mint.key() @ ErrorCode::Unauthorized,
+    )]
+    pub perf_pool_destination: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"reward_state"],
+        bump = reward_state.bump,
+        seeds::program = rewards::ID,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    // [whitepaper-sync v1.1] Gated to PROGRAM_ADMIN. The const is currently
+    // a placeholder (system_program::ID) — ⚠️ DO NOT DEPLOY without replacing.
+    #[account(address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub rewards_program: Program<'info, AuraRewards>,
+}
+
+// [whitepaper-sync v1.1] §5.8 Annual perpetual emission context.
+//
+// Two destination accounts: 80% to creator_rewards_destination, 20% to
+// dao_destination. Both mint-bound to ORA. Gated to PROGRAM_ADMIN.
+#[derive(Accounts)]
+pub struct AnnualEmissionMint<'info> {
+    #[account(
+        mut,
+        seeds = [b"ora_config"],
+        bump = ora_config.bump,
+        has_one = authority @ ErrorCode::Unauthorized,
+    )]
+    pub ora_config: Account<'info, OraConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"ora_mint"],
+        bump
+    )]
+    pub ora_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = creator_rewards_destination.mint == ora_mint.key() @ ErrorCode::Unauthorized,
+    )]
+    pub creator_rewards_destination: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = dao_destination.mint == ora_mint.key() @ ErrorCode::Unauthorized,
+    )]
+    pub dao_destination: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"reward_state"],
+        bump = reward_state.bump,
+        seeds::program = rewards::ID,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    // [whitepaper-sync v1.1] Gated to PROGRAM_ADMIN.
+    #[account(address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub rewards_program: Program<'info, AuraRewards>,
+}
+
+// [whitepaper-sync v1.1] §3 Y1 emergency mint context.
+#[derive(Accounts)]
+pub struct EmergencyMintY1<'info> {
+    #[account(
+        mut,
+        seeds = [b"ora_config"],
+        bump = ora_config.bump,
+        has_one = authority @ ErrorCode::Unauthorized,
+    )]
+    pub ora_config: Account<'info, OraConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"ora_mint"],
+        bump
+    )]
+    pub ora_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = emergency_destination.mint == ora_mint.key() @ ErrorCode::Unauthorized,
+    )]
+    pub emergency_destination: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"reward_state"],
+        bump = reward_state.bump,
+        seeds::program = rewards::ID,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    // [whitepaper-sync v1.1] Gated to PROGRAM_ADMIN.
+    #[account(address = PROGRAM_ADMIN @ ErrorCode::Unauthorized)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub rewards_program: Program<'info, AuraRewards>,
+}
+
 // === Error Codes ===
 
 // [audit fix E-C-3] removed duplicate `Unauthorized` variant (compilation blocker).
@@ -960,4 +1571,25 @@ pub enum ErrorCode {
     AlreadyMinted,
     #[msg("Total supply cap exceeded")]
     SupplyCapExceeded,
+    // [whitepaper-sync v1.1] §5.5 Performance Pool errors
+    #[msg("Performance pool: invalid year index (must be 1..=3)")]
+    PerfPoolInvalidYear,
+    #[msg("Performance pool: annual budget or cumulative cap exceeded")]
+    PerfPoolBudgetExceeded,
+    #[msg("Performance pool: this year tranche already approved")]
+    PerfPoolYearAlreadyApproved,
+    // [whitepaper-sync v1.1] §5.8 Annual emission errors
+    #[msg("Annual emission: invalid year index")]
+    AnnualEmissionInvalidYear,
+    #[msg("Annual emission: this year already emitted")]
+    AnnualEmissionYearAlreadyEmitted,
+    #[msg("Annual emission: at least 1 year must elapse between emissions")]
+    AnnualEmissionTooSoon,
+    // [whitepaper-sync v1.1] §3 Y1 emergency mint errors
+    #[msg("Y1 emergency mint already used")]
+    EmergencyMintAlreadyUsed,
+    #[msg("Y1 emergency mint window expired (auto-expires Y2)")]
+    EmergencyMintWindowExpired,
+    #[msg("Y1 emergency mint amount exceeds 1% of current supply")]
+    EmergencyMintCapExceeded,
 }

@@ -29,9 +29,29 @@ export const CONTENT_LICENSE_SEEDS = {
   REMIX: Buffer.from('remix'),
 } as const;
 
+// [whitepaper-sync v1.1] Remix royalty bounds per Whitepaper v1.1 §7.4 +
+// Numbers Handbook §12. The previous per-edge cap of 10000 (100%) was
+// tightened to 1500 (15%); the default remix royalty is 5% (500 bps); the
+// multi-hop cumulative drain across the remix chain is also capped at 15%.
+// Royalties may only be lowered after publication, never raised.
 export const CONTENT_LICENSE_LIMITS = {
-  /** royalty bps must be ≤ 10000 */
-  MAX_ROYALTY_BPS: 10_000,
+  /**
+   * @deprecated use MAX_REMIX_ROYALTY_BPS. Retained for migration callers.
+   * Per WP §7.4 the on-chain cap is now 1500 (15%), not 10000 (100%).
+   */
+  MAX_ROYALTY_BPS: 1_500,
+  /** Default remix royalty when a creator does not explicitly set one (5%). */
+  DEFAULT_REMIX_ROYALTY_BPS: 500,
+  /** Per-edge cap: a single creator can declare at most 15% royalty. */
+  MAX_REMIX_ROYALTY_BPS: 1_500,
+  /** Cumulative cap on the total drain across a multi-hop remix chain. */
+  REMIX_ROYALTY_CUMULATIVE_CAP_BPS: 1_500,
+  /** Finder's reward for reporting an undeclared remix (1%). */
+  UNDECLARED_REMIX_FINDER_REWARD_BPS: 100,
+  /** Penalty assessed for attribution misconduct (5%). */
+  ATTRIBUTION_DISPUTE_PENALTY_BPS: 500,
+  /** Silence-equals-approval window in seconds (72 hours). */
+  SILENCE_APPROVAL_WINDOW_SECONDS: 72 * 60 * 60,
 } as const;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -237,8 +257,9 @@ export class ContentLicenseModule {
 
   async setLicense(params: SetLicenseParams): Promise<TransactionResult> {
     const creator = this.requireWallet();
-    if (params.remixRoyaltyBps > CONTENT_LICENSE_LIMITS.MAX_ROYALTY_BPS) {
-      return errRes('remixRoyaltyBps > 10000');
+    // [whitepaper-sync v1.1] Per WP §7.4, per-edge cap is 1500 (15%), not 10000.
+    if (params.remixRoyaltyBps > CONTENT_LICENSE_LIMITS.MAX_REMIX_ROYALTY_BPS) {
+      return errRes('remixRoyaltyBps > 1500 (per WP §7.4 15% per-edge cap)');
     }
     const licensePda = this.licensePda(params.contentId);
     const data = Buffer.concat([
@@ -267,9 +288,10 @@ export class ContentLicenseModule {
     const creator = this.requireWallet();
     const licensePda = this.licensePda(params.contentId);
 
+    // [whitepaper-sync v1.1] Per WP §7.4, per-edge cap is 1500 (15%), not 10000.
     if (params.remixRoyaltyBps !== undefined &&
-        params.remixRoyaltyBps > CONTENT_LICENSE_LIMITS.MAX_ROYALTY_BPS) {
-      return errRes('remixRoyaltyBps > 10000');
+        params.remixRoyaltyBps > CONTENT_LICENSE_LIMITS.MAX_REMIX_ROYALTY_BPS) {
+      return errRes('remixRoyaltyBps > 1500 (per WP §7.4 15% per-edge cap)');
     }
 
     const optLt = params.licenseType !== undefined

@@ -317,6 +317,77 @@ export {
   ProgramIds,
 } from './types';
 
+// [whitepaper-sync v1.1] §13 content-keys — encrypted content with NFT access.
+export {
+  ContentKeysModule,
+  CONTENT_KEYS_SEEDS,
+  CONTENT_KEYS_FEE_BPS,
+  CONTENT_KEYS_LIMITS,
+  AccessKind,
+  computeCreatorNetPrimary,
+  computeSellerProceedsSecondary,
+} from './modules/contentKeys';
+export type {
+  ContentKeysPdas,
+  ContentKeysModuleConfig,
+  AccessType,
+  PublishContentParams as PublishContentKeysParams,
+  UpdateContentParams as UpdateContentKeysParams,
+  BuyKeyParams,
+  ListKeyParams,
+  BuyListedKeyParams,
+  ContentOnChain as EncryptedContentOnChain,
+  ContentKeyOnChain,
+  KeyListingOnChain,
+} from './modules/contentKeys';
+
+// [whitepaper-sync v1.1] §5.6 launch-incentives — three sub-programs (Million Plan / Onboarding / Rising Star).
+export {
+  LaunchIncentivesModule,
+  LAUNCH_INCENTIVES_SEEDS,
+  MILLION_PLAN_POOL,
+  ONBOARDING_POOL,
+  RISING_STAR_POOL,
+  LAUNCH_INCENTIVE_TOTAL,
+  MILESTONE_COUNT,
+  MILESTONE_DAU_THRESHOLDS,
+  MILESTONE_RELEASES,
+  MILESTONE_PER_USER_CAP,
+  ONBOARDING_MIN_EXTERNAL_FOLLOWERS,
+  ONBOARDING_RATE_PER_FOLLOWER,
+  ONBOARDING_PER_CREATOR_CAP,
+  ONBOARDING_UNLOCK_MONTHS,
+  ONBOARDING_MONTH_SECS,
+  ONBOARDING_MAX_CONSECUTIVE_MISSES,
+  RISING_STAR_RATE_PER_FOLLOWER,
+  RISING_STAR_MONTHLY_CAP,
+  RISING_STAR_DURATION_MONTHS,
+  OnboardingStatus,
+  RisingStarStatus,
+  deriveMilestonePda,
+  deriveMillionClaimPda,
+  deriveOnboardingGrantPda,
+  deriveRisingStarGrantPda,
+  deriveRisingStarMonthPda,
+} from './modules/launchIncentives';
+export type {
+  LaunchIncentivesPdas,
+  LaunchIncentivesStateOnChain,
+  MilestoneStateOnChain,
+  OnboardingGrantOnChain,
+  RisingStarGrantOnChain,
+  InitializeLaunchIncentivesParams,
+  InitializeMilestoneStateParams,
+  TriggerMilestoneParams,
+  ClaimMillionRewardParams,
+  RegisterOnboardingParams,
+  ClaimMonthlyUnlockParams,
+  ForfeitOnboardingParams,
+  RegisterRisingStarParams,
+  RecordMonthlyFollowersParams,
+  ClaimRisingStarMonthlyParams,
+} from './modules/launchIncentives';
+
 // Constants
 export { PROGRAM_IDS, RPC_ENDPOINTS, SEEDS } from './constants';
 

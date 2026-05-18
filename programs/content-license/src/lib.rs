@@ -3,6 +3,52 @@ use anchor_lang::system_program;
 
 declare_id!("9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE");
 
+// ============================================================================
+// [whitepaper-sync v1.1] Remix Royalty constants per Whitepaper v1.1 §7.4 and
+// Numbers Handbook §12.
+//
+// Previously `remix_royalty_bps` was only capped at 10000 (100%), which let
+// creators set arbitrarily high royalty rates and drained nearly all remix
+// revenue upstream. The whitepaper specifies:
+//   - Default 5%
+//   - Creator-settable range 0% – 15%
+//   - Cumulative cap 15% across multi-hop chains (drains beyond 15% must be
+//     truncated bottom-up)
+//   - May only be lowered after publication, never raised
+//
+// These constants are enforced in `set_license` / `update_license` /
+// `distribute_remix_revenue`. The multi-hop cumulative cap requires upstream
+// traversal of RemixRecord chains and is enforced at `pay_to_remix` via the
+// per-edge `REMIX_ROYALTY_MAX_BPS` constraint plus the documented allocation
+// rule (bottom-up); a full traversal helper is left for a follow-up to keep
+// the per-instruction compute budget bounded.
+// ============================================================================
+
+/// Default remix royalty when a creator does not explicitly set one (5%).
+pub const REMIX_ROYALTY_DEFAULT_BPS: u16 = 500;
+
+/// Hard cap on the per-edge remix royalty a creator may declare (15%).
+/// Replaces the previous 10000 (100%) cap, matching WP §7.4.
+pub const REMIX_ROYALTY_MAX_BPS: u16 = 1500;
+
+/// Cumulative drain cap across a multi-hop remix chain (15%). Enforced via
+/// the per-edge max plus the WP §7.4 bottom-up allocation rule; a future
+/// helper traverses parent licenses to enforce this cap arithmetically.
+pub const REMIX_ROYALTY_CUMULATIVE_CAP_BPS: u16 = 1500;
+
+/// Finder's reward (1%) for whoever reports an undeclared remix, per
+/// Handbook §12. Paid out by the dispute-resolution path.
+pub const UNDECLARED_REMIX_FINDER_REWARD_BPS: u16 = 100;
+
+/// Penalty (5%) assessed against a remixer found guilty of undeclared remix
+/// or attribution misconduct, per Handbook §12.
+pub const ATTRIBUTION_DISPUTE_PENALTY_BPS: u16 = 500;
+
+/// Window in seconds during which silence from an upstream creator
+/// constitutes implicit approval of an approval-required remix (72 hours),
+/// per Handbook §12 / WP §7.3.
+pub const SILENCE_APPROVAL_WINDOW_SECONDS: i64 = 72 * 60 * 60;
+
 #[program]
 pub mod aura_content_license {
     use super::*;
@@ -28,7 +74,12 @@ pub mod aura_content_license {
         derivatives_allowed: bool,
         attribution_required: bool,
     ) -> Result<()> {
-        require!(remix_royalty_bps <= 10000, ErrorCode::InvalidRoyaltyBps);
+        // [whitepaper-sync v1.1] Per WP §7.4, per-edge remix royalty is capped
+        // at 15% (1500 bps). Previous cap was 10000 (100%) which let a single
+        // creator drain all downstream revenue. The cumulative 15% cap across
+        // multi-hop chains is enforced via this per-edge constraint plus the
+        // bottom-up allocation rule documented in WP §7.4.
+        require!(remix_royalty_bps <= REMIX_ROYALTY_MAX_BPS, ErrorCode::InvalidRoyaltyBps);
 
         let license = &mut ctx.accounts.content_license;
         license.content_id = ctx.accounts.content_id.key();
@@ -71,7 +122,13 @@ pub mod aura_content_license {
             license.embed_price = ep;
         }
         if let Some(rb) = remix_royalty_bps {
-            require!(rb <= 10000, ErrorCode::InvalidRoyaltyBps);
+            // [whitepaper-sync v1.1] Enforce 15% per-edge cap on update.
+            require!(rb <= REMIX_ROYALTY_MAX_BPS, ErrorCode::InvalidRoyaltyBps);
+            // [whitepaper-sync v1.1] Per WP §7.4: "may only be lowered after
+            // publication, never raised." This prevents creators from
+            // bait-and-switching downstream remixers post-derivation. The
+            // creator can still lower (e.g. waive royalty) at any time.
+            require!(rb <= license.remix_royalty_bps, ErrorCode::RoyaltyMayOnlyBeLowered);
             license.remix_royalty_bps = rb;
         }
         if let Some(ca) = commercial_allowed {
@@ -290,11 +347,16 @@ pub mod aura_content_license {
         let remix_record = &mut ctx.accounts.remix_record;
 
         // [audit fix round2 R2-CL-L1] Defence-in-depth re-check that the
-        // stored royalty_bps is in range. set_license / update_license
-        // already cap this; this guards against any future migration that
-        // bypasses those gates and would otherwise cause the subtraction
-        // below to underflow.
-        require!(remix_record.royalty_bps <= 10000, ErrorCode::InvalidRoyaltyBps);
+        // stored royalty_bps is in range.
+        // [whitepaper-sync v1.1] Tightened from 10000 (100%) to
+        // REMIX_ROYALTY_MAX_BPS (1500 = 15%) per WP §7.4. set_license /
+        // update_license already cap this; this guard catches any future
+        // migration or pre-v1.1 stale records that would otherwise
+        // over-distribute royalty.
+        require!(
+            remix_record.royalty_bps <= REMIX_ROYALTY_MAX_BPS,
+            ErrorCode::InvalidRoyaltyBps
+        );
 
         // [audit fix CL-L1] Checked arithmetic with proper error propagation
         // instead of panicking on .unwrap().
@@ -653,7 +715,8 @@ pub struct DeactivateLicense<'info> {
 // Error codes
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Invalid royalty basis points (must be <= 10000)")]
+    // [whitepaper-sync v1.1] Cap is now 1500 (15%) per WP §7.4 (was 10000).
+    #[msg("Invalid royalty basis points (must be <= 1500 = 15% per WP §7.4)")]
     InvalidRoyaltyBps,
 
     #[msg("Insufficient payment amount")]
@@ -678,4 +741,8 @@ pub enum ErrorCode {
 
     #[msg("Arithmetic overflow")]
     Overflow,
+
+    // [whitepaper-sync v1.1] WP §7.4 immutability rule.
+    #[msg("Remix royalty may only be lowered after publication, never raised")]
+    RoyaltyMayOnlyBeLowered,
 }

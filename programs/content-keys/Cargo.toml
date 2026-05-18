@@ -1,0 +1,21 @@
+[package]
+name = "aura-content-keys"
+version = "0.1.0"
+description = "AURA Content Keys Program - encrypted content access via NFT keys"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "aura_content_keys"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang = "0.29.0"
+anchor-spl = "0.29.0"

@@ -18,6 +18,9 @@ import { ContentLicenseModule } from './modules/contentLicense';
 import { SocialGraphModule } from './modules/socialGraph';
 import { GovernanceModule } from './modules/governance';
 import { FractionalizeModule } from './modules/fractionalize';
+// [whitepaper-sync v1.1] §5.6 launch-incentives
+import { LaunchIncentivesModule } from './modules/launchIncentives';
+import { ContentKeysModule, ContentKeysModuleConfig } from './modules/contentKeys';
 
 /**
  * Main AURA Protocol SDK Client
@@ -71,6 +74,9 @@ export class AuraClient {
   private readonly contentLicenseProgramId: PublicKey;
   private readonly socialGraphProgramId: PublicKey;
   private readonly fractionalizeProgramId: PublicKey;
+  private readonly contentKeysProgramId: PublicKey;
+  // [whitepaper-sync v1.1] §5.6 launch-incentives
+  private readonly launchIncentivesProgramId: PublicKey;
 
   // Modules
   public readonly content: ContentModule;
@@ -89,6 +95,9 @@ export class AuraClient {
   public readonly socialGraph: SocialGraphModule;
   public readonly governance: GovernanceModule;
   public readonly fractionalize: FractionalizeModule;
+  public readonly contentKeys: ContentKeysModule;
+  // [whitepaper-sync v1.1] §5.6 launch-incentives
+  public readonly launchIncentives: LaunchIncentivesModule;
 
   /**
    * Create a new AURA Protocol SDK client
@@ -124,6 +133,9 @@ export class AuraClient {
     this.contentLicenseProgramId = optProgramId('contentLicense');
     this.socialGraphProgramId = optProgramId('socialGraph');
     this.fractionalizeProgramId = optProgramId('fractionalize');
+    // [whitepaper-sync v1.1] §5.6 launch-incentives
+    this.launchIncentivesProgramId = optProgramId('launchIncentives');
+    this.contentKeysProgramId = optProgramId('contentKeys');
 
     // Initialize modules
     this.content = new ContentModule(
@@ -235,6 +247,28 @@ export class AuraClient {
       this.wallet,
       this.fractionalizeProgramId
     );
+
+    // [whitepaper-sync v1.1] §13 content-keys — Content keys module needs
+    // the same ORA / staking / gas / ops pool pubkeys as MarketModule.
+    const contentKeysCfg: ContentKeysModuleConfig = config.contentKeysConfig ?? {
+      oraMint: marketCfg.oraMint,
+      stakingRewardsPool: marketCfg.stakingRewardsPool,
+      gasReservePool: marketCfg.gasReservePool,
+      opsTreasuryPool: marketCfg.opsTreasuryPool,
+    };
+    this.contentKeys = new ContentKeysModule(
+      this.connection,
+      this.wallet,
+      this.contentKeysProgramId,
+      contentKeysCfg
+    );
+
+    // [whitepaper-sync v1.1] §5.6 launch-incentives
+    this.launchIncentives = new LaunchIncentivesModule(
+      this.connection,
+      this.wallet,
+      this.launchIncentivesProgramId
+    );
   }
 
   /**
@@ -269,6 +303,8 @@ export class AuraClient {
       contentLicense: this.contentLicenseProgramId,
       socialGraph: this.socialGraphProgramId,
       fractionalize: this.fractionalizeProgramId,
+      // [whitepaper-sync v1.1] §5.6 launch-incentives
+      launchIncentives: this.launchIncentivesProgramId,
     };
   }
 
