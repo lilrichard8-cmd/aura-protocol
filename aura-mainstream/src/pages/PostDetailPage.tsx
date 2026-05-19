@@ -17,6 +17,9 @@ import { useIsSelf } from '@/hooks/useIsSelf';
 import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import CurateModal from '@/components/curation/CurateModal';
+import { useCoreContract } from '@/hooks/useCoreContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
+import { PublicKey } from '@solana/web3.js';
 
 export default function PostDetailPage() {
   const { t } = useI18n();
@@ -215,7 +218,15 @@ export default function PostDetailPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [handleNavPrev, handleNavNext]);
 
-  const handleLike = () => {
+  // 2026-05-19 — real-chain like hook. When the post has an on-chain
+  // PDA (set by CreatePage publishContent) AND the core flag is on, we
+  // mirror the click to the chain. The mockChain toggle stays so the
+  // viewer's local heart state still persists across reloads regardless
+  // of RPC health.
+  const coreOnChain = useCoreContract();
+  const unifiedWallet = useUnifiedWallet();
+  const onChainPostPda = (post as any).onChainPostPda as string | undefined;
+  const handleLike = async () => {
     const wasLiked = liked;
     mockChain.toggleLikePost?.(post.id);
     showToast(
@@ -223,9 +234,30 @@ export default function PostDetailPage() {
       wasLiked ? 'Unliked' : 'Liked!',
       `Post ${wasLiked ? 'removed from' : 'added to'} your favorites`,
     );
-    // Note: liking someone else's post is *outbound* — the recipient (the
-    // post's author) is the one who would receive a notification. We
-    // never notify the current user about their own outbound action.
+    if (
+      onChainPostPda &&
+      coreOnChain.enabled &&
+      coreOnChain.module &&
+      unifiedWallet.connected
+    ) {
+      try {
+        const postKey = new PublicKey(onChainPostPda);
+        const res = wasLiked
+          ? await coreOnChain.module.unlikePost(postKey)
+          : await coreOnChain.module.likePost(postKey);
+        if (res.success && res.signature) {
+          showToast(
+            'success',
+            wasLiked ? '⛓️ Unlike on-chain' : '⛓️ Like on-chain',
+            `tx: ${res.signature.slice(0, 8)}…`,
+          );
+        } else if (!res.success && res.error) {
+          console.warn('[PostDetail] on-chain like failed:', res.error);
+        }
+      } catch (e: any) {
+        console.warn('[PostDetail] like dispatch failed:', e?.message);
+      }
+    }
   };
 
   const handleComment = () => {

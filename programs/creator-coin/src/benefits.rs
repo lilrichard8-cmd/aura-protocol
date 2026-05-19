@@ -1,7 +1,11 @@
 use anchor_lang::prelude::*;
 
 /// Maximum number of benefits per creator coin
-pub const MAX_BENEFITS: usize = 50;
+// [stack-fix / cpi-cap 2026-05-19] Reduced from 50 → 40 so the BenefitsList
+// PDA's max size (81 + 40*250 = 10,081 bytes) fits under Solana's 10,240-byte
+// CPI allocate cap. Without this, `system_instruction::create_account` inside
+// Anchor's `init` constraint fails with "Failed to reallocate account data".
+pub const MAX_BENEFITS: usize = 40;
 /// Maximum URI length for benefit metadata
 pub const MAX_URI_LEN: usize = 200;
 

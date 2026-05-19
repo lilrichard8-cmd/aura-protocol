@@ -2,25 +2,23 @@
  * StakingModule — ORA staking on-chain operations.
  *
  * Wraps the `aura_staking` program (programs/staking/src/lib.rs):
- *   - initialize_staking_pool
- *   - stake_ora                (with LockupTier: 1mo / 3mo / 6mo / 12mo)  [audit fix R5 H-S-1]
- *   - unstake_ora              (20% penalty when early)
- *   - claim_staking_reward
- *   - update_daily_rewards     (authority only)
+ *   - initialize_staking_pool   (admin only, gated to PROGRAM_ADMIN)
+ *   - initialize_stake_counter  (one-time per user, mints stake-nonce 0,1,2,…)
+ *   - stake_ora(amount, lockup_tier)
+ *   - unstake_ora(stake_nonce)
+ *   - claim_staking_reward(stake_nonce)
+ *   - update_daily_rewards      (admin only)
+ *   - close_stake_counter
  *
- * Discriminators are real Anchor hashes (sha256("global:<snake_case>")[..8])
- * so this matches the deployed binary, not a fake 1-byte tag.
+ * [audit fix C-S1] PDA seeds:
+ *   StakingPool:  [b"staking_pool"]
+ *   StakeCounter: [b"stake-counter", user]
+ *   StakeAccount: [b"stake", user, nonce_u64_le]   ← nonce is monotonic per
+ *                                                    user, allocated by the
+ *                                                    on-chain StakeCounter
  *
- * NOTE on stake PDA seeds: the on-chain seeds are
- *   [b"stake", user.key().as_ref(), &Clock::get()?.unix_timestamp.to_le_bytes()]
- *
- * i.e. the contract derives the seed using the current cluster time at
- * tx execution. The client cannot match that exactly off-chain. Callers
- * compute a candidate PDA with `nowSeconds` (defaults to `Date.now()/1000`)
- * and submit; if the validator's clock drifts by ≥1s the tx will fail and
- * the caller should retry. (The Rust contract takes an explicit `stake_nonce`
- * arg too — passed but not yet used in the seed derivation; see whitepaper
- * task FIX #12.)
+ * Discriminators are real Anchor (sha256("global:<snake_case>")[..8]) so this
+ * matches the deployed binary exactly.
  */
 
 import {
@@ -43,6 +41,8 @@ import { TransactionResult } from '../types';
 
 export const STAKING_SEEDS = {
   POOL: Buffer.from('staking_pool'),
+  /** [audit fix C-S1] per-user monotonic nonce allocator (StakeCounter::SEED). */
+  COUNTER: Buffer.from('stake-counter'),
   STAKE: Buffer.from('stake'),
 } as const;
 
@@ -57,11 +57,6 @@ export enum LockupTier {
   TwelveMonths = 3,
 }
 
-// [audit fix R5 H-S-1] Whitepaper v1.1 §14.3 + Numbers Handbook §14 specify
-// 1mo=1.0x / 3mo=1.0x / 6mo=1.5x / 12mo=2.0x. Previous tiers (1d / 30d /
-// 90d / 180d) were a Phase-0 placeholder; the 12-month tier was missing and
-// the 1-day tier had no WP basis. SDK matches programs/staking/src/lib.rs
-// in lockstep.
 export const LOCKUP_PARAMS: Record<LockupTier, { days: number; multiplierBps: number }> = {
   [LockupTier.OneMonth]:     { days: 30,  multiplierBps: 10_000 }, // 1.00x
   [LockupTier.ThreeMonths]:  { days: 90,  multiplierBps: 10_000 }, // 1.00x
@@ -71,6 +66,9 @@ export const LOCKUP_PARAMS: Record<LockupTier, { days: number; multiplierBps: nu
 
 /** Early unstake penalty (20%). */
 export const EARLY_UNSTAKE_PENALTY_BPS = 2_000;
+
+/** Minimum stake amount (1,000 ORA, 9 decimals). Matches MIN_STAKE_AMOUNT. */
+export const MIN_STAKE_AMOUNT_RAW = 1_000n * 1_000_000_000n;
 
 // ────────────────────────────────────────────────────────────────────────
 // Anchor discriminator helpers
@@ -94,11 +92,6 @@ function u64LE(v: bigint | number): Buffer {
   b.writeBigUInt64LE(typeof v === 'bigint' ? v : BigInt(v), 0);
   return b;
 }
-function i64LE(v: bigint | number): Buffer {
-  const b = Buffer.alloc(8);
-  b.writeBigInt64LE(typeof v === 'bigint' ? v : BigInt(v), 0);
-  return b;
-}
 
 // ────────────────────────────────────────────────────────────────────────
 // PDA helpers
@@ -106,21 +99,26 @@ function i64LE(v: bigint | number): Buffer {
 
 export interface StakingPdas {
   pool: PublicKey;
-  /** Stake seed contains the unix timestamp from the validator clock when
-   *  the tx executes. Pass that timestamp as i64-LE to derive the same PDA
-   *  the contract will allocate. */
-  stake(user: PublicKey, unixTimestampSeconds: bigint | number): PublicKey;
+  counter(user: PublicKey): PublicKey;
+  /** [audit fix C-S1] stake PDA seeds = [b"stake", user, nonce_u64_le]. */
+  stake(user: PublicKey, nonce: bigint | number): PublicKey;
 }
 
 function makePdas(programId: PublicKey): StakingPdas {
   const [pool] = PublicKey.findProgramAddressSync([STAKING_SEEDS.POOL], programId);
   return {
     pool,
-    stake(user, ts) {
-      const tsBuf = i64LE(ts);
+    counter(user) {
       const [pda] = PublicKey.findProgramAddressSync(
-        [STAKING_SEEDS.STAKE, user.toBuffer(), tsBuf],
-        programId
+        [STAKING_SEEDS.COUNTER, user.toBuffer()],
+        programId,
+      );
+      return pda;
+    },
+    stake(user, nonce) {
+      const [pda] = PublicKey.findProgramAddressSync(
+        [STAKING_SEEDS.STAKE, user.toBuffer(), u64LE(nonce)],
+        programId,
       );
       return pda;
     },
@@ -138,25 +136,23 @@ export interface InitializeStakingPoolParams {
 export interface StakeOraParams {
   amount: bigint | number;
   lockupTier: LockupTier;
-  /** Disambiguator passed to the program (does not currently affect PDA). */
-  stakeNonce: bigint | number;
   /** Vault token account (ORA, authority = pool PDA). */
   vaultTokenAccount: PublicKey;
   /** User's source ORA ATA. */
   userTokenAccount: PublicKey;
-  /** Unix-seconds to use for PDA derivation. Default: current time. */
-  nowSeconds?: bigint | number;
 }
 
 export interface UnstakeOraParams {
-  /** Stake PDA address (use the same `unixTimestamp` originally used). */
-  stakeAddress: PublicKey;
+  /** Monotonic nonce assigned by StakeCounter when the stake was created. */
+  stakeNonce: bigint | number;
   vaultTokenAccount: PublicKey;
+  /** Reward vault token account (must be owned by staking_pool PDA). */
+  rewardVault: PublicKey;
   userTokenAccount: PublicKey;
 }
 
 export interface ClaimStakingRewardParams {
-  stakeAddress: PublicKey;
+  stakeNonce: bigint | number;
   rewardVault: PublicKey;
   userTokenAccount: PublicKey;
 }
@@ -180,6 +176,13 @@ export interface StakingPoolOnChain {
   rewardPoolBalance: bigint;
   lastDailyUpdate: number;
   accumulatedRewardPerWeight: bigint;
+  bump: number;
+}
+
+export interface StakeCounterOnChain {
+  address: PublicKey;
+  user: PublicKey;
+  nextNonce: bigint;
   bump: number;
 }
 
@@ -207,7 +210,7 @@ export class StakingModule {
   constructor(
     private connection: Connection,
     private wallet: WalletAdapter,
-    private programId: PublicKey
+    private programId: PublicKey,
   ) {
     this.pdas = makePdas(programId);
   }
@@ -220,10 +223,23 @@ export class StakingModule {
     return parseStakingPool(this.pdas.pool, acc.data);
   }
 
+  /** Read a user's StakeCounter (returns null if not yet initialized). */
+  async fetchCounter(user: PublicKey): Promise<StakeCounterOnChain | null> {
+    const addr = this.pdas.counter(user);
+    const acc = await this.connection.getAccountInfo(addr);
+    if (!acc) return null;
+    return parseStakeCounter(addr, acc.data);
+  }
+
   async fetchStake(addr: PublicKey): Promise<StakeAccountOnChain | null> {
     const acc = await this.connection.getAccountInfo(addr);
     if (!acc) return null;
     return parseStakeAccount(addr, acc.data);
+  }
+
+  /** Read a stake by (user, nonce). Convenience helper. */
+  async fetchStakeByNonce(user: PublicKey, nonce: bigint | number): Promise<StakeAccountOnChain | null> {
+    return this.fetchStake(this.pdas.stake(user, nonce));
   }
 
   // ── writes ────────────────────────────────────────────────────────────
@@ -244,30 +260,80 @@ export class StakingModule {
     return this.sendTx([ix]);
   }
 
-  /** Stake ORA. Returns the stake account PDA on success. */
-  async stakeOra(params: StakeOraParams): Promise<TransactionResult & { stake?: PublicKey; nowSeconds?: bigint }> {
+  /**
+   * [audit fix C-S1] One-time per user. Idempotent: if the counter already
+   * exists, skips with success=true and no-op signature.
+   */
+  async initializeStakeCounter(): Promise<TransactionResult> {
+    const user = this.requireWallet();
+    const counterPda = this.pdas.counter(user);
+    const existing = await this.connection.getAccountInfo(counterPda);
+    if (existing) return { signature: '', success: true };
+
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: counterPda, isSigner: false, isWritable: true },
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: ixDiscriminator('initialize_stake_counter'),
+    });
+    return this.sendTx([ix]);
+  }
+
+  /**
+   * Stake ORA. Auto-ensures the StakeCounter exists, then stakes.
+   *
+   * Returns the stake PDA and the nonce assigned by the on-chain counter.
+   * The nonce is read off-chain immediately before the tx so it matches the
+   * Anchor seed evaluation (seeds use `stake_counter.next_nonce` *before*
+   * the ix body increments it).
+   */
+  async stakeOra(
+    params: StakeOraParams,
+  ): Promise<TransactionResult & { stake?: PublicKey; nonce?: bigint }> {
     const user = this.requireWallet();
 
     const amount = BigInt(params.amount);
     if (amount <= 0n) return errRes('amount must be > 0');
 
-    const now = params.nowSeconds !== undefined
-      ? BigInt(params.nowSeconds)
-      : BigInt(Math.floor(Date.now() / 1000));
+    const ixs: TransactionInstruction[] = [];
+    const counterPda = this.pdas.counter(user);
 
-    const stakePda = this.pdas.stake(user, now);
+    // [audit fix C-S1] Ensure counter exists; if it does, read its next_nonce
+    // to derive the stake PDA. If not, init it (next_nonce will be 0).
+    let nextNonce: bigint;
+    const counterAcc = await this.connection.getAccountInfo(counterPda);
+    if (!counterAcc) {
+      ixs.push(new TransactionInstruction({
+        programId: this.programId,
+        keys: [
+          { pubkey: counterPda, isSigner: false, isWritable: true },
+          { pubkey: user, isSigner: true, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: ixDiscriminator('initialize_stake_counter'),
+      }));
+      nextNonce = 0n;
+    } else {
+      const counter = parseStakeCounter(counterPda, counterAcc.data);
+      nextNonce = counter.nextNonce;
+    }
+
+    const stakePda = this.pdas.stake(user, nextNonce);
 
     const data = Buffer.concat([
       ixDiscriminator('stake_ora'),
       u64LE(amount),
-      u8(params.lockupTier),         // enum is unit-variant → 1 byte
-      u64LE(BigInt(params.stakeNonce)),
+      u8(params.lockupTier), // enum is unit-variant → 1 byte
     ]);
 
-    const ix = new TransactionInstruction({
+    ixs.push(new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: this.pdas.pool, isSigner: false, isWritable: true },
+        { pubkey: counterPda, isSigner: false, isWritable: true },
         { pubkey: stakePda, isSigner: false, isWritable: true },
         { pubkey: params.vaultTokenAccount, isSigner: false, isWritable: true },
         { pubkey: params.userTokenAccount, isSigner: false, isWritable: true },
@@ -277,48 +343,84 @@ export class StakingModule {
         { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
       ],
       data,
-    });
+    }));
 
-    const res = await this.sendTx([ix]);
-    return { ...res, stake: stakePda, nowSeconds: now };
+    const res = await this.sendTx(ixs);
+    return { ...res, stake: stakePda, nonce: nextNonce };
   }
 
   async unstakeOra(params: UnstakeOraParams): Promise<TransactionResult> {
     const user = this.requireWallet();
+    const nonce = BigInt(params.stakeNonce);
+    const stakePda = this.pdas.stake(user, nonce);
+
+    const data = Buffer.concat([
+      ixDiscriminator('unstake_ora'),
+      u64LE(nonce),
+    ]);
+
     const ix = new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: this.pdas.pool, isSigner: false, isWritable: true },
-        { pubkey: params.stakeAddress, isSigner: false, isWritable: true },
+        { pubkey: stakePda, isSigner: false, isWritable: true },
         { pubkey: params.vaultTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: params.rewardVault, isSigner: false, isWritable: true },
         { pubkey: params.userTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: user, isSigner: false, isWritable: false }, // owner check via has_one
+        // owner CHECK account: passed twice — once as AccountInfo for the
+        // has_one check, then `user` as Signer.
+        { pubkey: user, isSigner: false, isWritable: false },
         { pubkey: user, isSigner: true, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
-      data: ixDiscriminator('unstake_ora'),
+      data,
     });
     return this.sendTx([ix]);
   }
 
   async claimStakingReward(params: ClaimStakingRewardParams): Promise<TransactionResult> {
     const user = this.requireWallet();
+    const nonce = BigInt(params.stakeNonce);
+    const stakePda = this.pdas.stake(user, nonce);
+
+    const data = Buffer.concat([
+      ixDiscriminator('claim_staking_reward'),
+      u64LE(nonce),
+    ]);
+
     const ix = new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: this.pdas.pool, isSigner: false, isWritable: false },
-        { pubkey: params.stakeAddress, isSigner: false, isWritable: true },
+        { pubkey: stakePda, isSigner: false, isWritable: true },
         { pubkey: params.rewardVault, isSigner: false, isWritable: true },
         { pubkey: params.userTokenAccount, isSigner: false, isWritable: true },
+        // owner CHECK account, then user signer.
+        { pubkey: user, isSigner: false, isWritable: false },
         { pubkey: user, isSigner: true, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
-      data: ixDiscriminator('claim_staking_reward'),
+      data,
     });
     return this.sendTx([ix]);
   }
 
-  /** Authority-only. Adds new rewards to the pool from a 2%-fee bucket. */
+  /** Close a fully-drained StakeCounter (refund rent). */
+  async closeStakeCounter(): Promise<TransactionResult> {
+    const user = this.requireWallet();
+    const counterPda = this.pdas.counter(user);
+    const ix = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: counterPda, isSigner: false, isWritable: true },
+        { pubkey: user, isSigner: true, isWritable: true },
+      ],
+      data: ixDiscriminator('close_stake_counter'),
+    });
+    return this.sendTx([ix]);
+  }
+
+  /** Authority-only. Adds new rewards to the pool from the 2%-fee bucket. */
   async updateDailyRewards(params: UpdateDailyRewardsParams): Promise<TransactionResult> {
     const authority = this.requireWallet();
     const data = Buffer.concat([
@@ -379,6 +481,7 @@ export class StakingModule {
 // ────────────────────────────────────────────────────────────────────────
 
 const STAKING_POOL_DISC = accountDiscriminator('StakingPool');
+const STAKE_COUNTER_DISC = accountDiscriminator('StakeCounter');
 const STAKE_ACCOUNT_DISC = accountDiscriminator('StakeAccount');
 
 function parseStakingPool(addr: PublicKey, data: Buffer): StakingPoolOnChain {
@@ -398,6 +501,17 @@ function parseStakingPool(addr: PublicKey, data: Buffer): StakingPoolOnChain {
     address: addr, authority, oraMint, totalStaked, totalWeightedStake,
     rewardPoolBalance, lastDailyUpdate, accumulatedRewardPerWeight, bump,
   };
+}
+
+function parseStakeCounter(addr: PublicKey, data: Buffer): StakeCounterOnChain {
+  if (!data.slice(0, 8).equals(STAKE_COUNTER_DISC)) {
+    throw new Error('Account is not a StakeCounter');
+  }
+  let o = 8;
+  const user = new PublicKey(data.slice(o, o + 32)); o += 32;
+  const nextNonce = data.readBigUInt64LE(o); o += 8;
+  const bump = data.readUInt8(o); o += 1;
+  return { address: addr, user, nextNonce, bump };
 }
 
 function parseStakeAccount(addr: PublicKey, data: Buffer): StakeAccountOnChain {

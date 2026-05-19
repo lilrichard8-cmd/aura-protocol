@@ -15,6 +15,10 @@ import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
 import { useUserPosts } from '@/hooks/useUserPosts';
+import { useCreatorCoinContract } from '@/hooks/useCreatorCoinContract';
+import { useCreatorCoinRedemption } from '@/hooks/useCreatorCoinRedemption';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { PublicKey } from '@solana/web3.js';
 import BatchUnlockCeremony from '@/components/coin/BatchUnlockCeremony';
 import BatchPricingPlan from '@/components/coin/BatchPricingPlan';
 import RedeemConfirmDialog from '@/components/coin/RedeemConfirmDialog';
@@ -101,6 +105,14 @@ export default function CoinDetailPage() {
   const mockChain = useMockChain();
   const oraGuard = useOraGuard();
   const { user: authUser } = useAuth();
+  // Real-chain bridge — only fires when VITE_CREATOR_COIN_REAL_CHAIN=true.
+  // When disabled, `onChain.enabled` is false and all real-chain branches
+  // are skipped; mock chain remains authoritative for the UI.
+  const onChain = useCreatorCoinContract();
+  // 2026-05-19 — dedicated redemption facade. Same feature flag as
+  // useCreatorCoinContract so they enable/disable in lockstep.
+  const redemptionChain = useCreatorCoinRedemption();
+  const { publicKey: walletPublicKey } = useWallet();
   // 2026-05-11: Own-coin detail page needs to surface the user's freshly-
   // published posts. CreatePage writes to localStorage `aura_user_posts`,
   // and `useUserPosts` hydrates that stream into canonical Post objects.
@@ -131,6 +143,11 @@ export default function CoinDetailPage() {
     price: number;
     description: string;
     time: string;
+    // On-chain order PDA + signer pubkeys. Populated when the order was
+    // placed via the real-chain path so cancel/fill can call the SDK.
+    onChainOrder?: string;
+    onChainCreator?: string;
+    onChainMaker?: string;
   }
 
   // Pre-seeded mock orders only for legacy demo coins; user's own freshly-minted coin starts empty.
@@ -144,7 +161,7 @@ export default function CoinDetailPage() {
     return [];
   });
 
-  const handlePostOrder = () => {
+  const handlePostOrder = async () => {
     if (!orderAmount || !orderPrice) {
       showToast('error', t.orders.fillRequired);
       return;
@@ -180,6 +197,33 @@ export default function CoinDetailPage() {
         return;
       }
     }
+    // Real-chain mirror: best-effort. The page state still tracks the
+    // mock book; the on-chain order id surfaces via the toast for now.
+    let placedOrderPda: string | undefined;
+    let placedOrderCreator: string | undefined;
+    let placedOrderMaker: string | undefined;
+    if (onChain.enabled && onChain.module && walletPublicKey) {
+      try {
+        const creatorPk = resolveCreatorPubkey();
+        if (creatorPk) {
+          if (orderType === 'sell') {
+            const res = await onChain.placeSellOrder({ creator: creatorPk, amount: amt, pricePerCoin: px });
+            if (res.success && res.order) {
+              placedOrderPda = res.order.toBase58();
+              placedOrderCreator = creatorPk.toBase58();
+              placedOrderMaker = walletPublicKey.toBase58();
+            } else if (!res.success) {
+              showToast('error', res.error || 'On-chain sell order failed');
+            }
+          }
+          // Buy-side orders are not modeled as on-chain orders in the
+          // creator-coin program — they're handled off-chain via the order
+          // book UI. So we deliberately skip the chain call here.
+        }
+      } catch (err: any) {
+        showToast('error', err.message || 'On-chain order error');
+      }
+    }
     const newOrder: OrderPost = {
       id: `o${Date.now()}`,
       type: orderType,
@@ -192,6 +236,9 @@ export default function CoinDetailPage() {
       price: px,
       description: orderDesc || (orderType === 'sell' ? t.orders.sell : t.orders.buy),
       time: t.coin.justNow,
+      onChainOrder: placedOrderPda,
+      onChainCreator: placedOrderCreator,
+      onChainMaker: placedOrderMaker,
     };
     setOrders(prev => [newOrder, ...prev]);
     setOrderAmount('');
@@ -229,7 +276,7 @@ export default function CoinDetailPage() {
     }
   };
 
-  const handleCancelOrder = (order: OrderPost) => {
+  const handleCancelOrder = async (order: OrderPost) => {
     if (order.type === 'sell') {
       mockChain.releaseSellOrder('$' + coinData.symbol, order.amount);
       showToast('success', `↩️ Cancelled — ${order.amount} ${coinData.symbol} returned to your wallet.`);
@@ -237,12 +284,63 @@ export default function CoinDetailPage() {
       showToast('success', 'Buy order cancelled.');
     }
     setOrders(prev => prev.filter(o => o.id !== order.id));
+    // Real-chain mirror — fires only when we recorded the PDA at placement.
+    if (onChain.enabled && onChain.module && order.type === 'sell' && order.onChainOrder && order.onChainCreator) {
+      try {
+        const res = await onChain.cancelOrder({
+          creator: new PublicKey(order.onChainCreator),
+          order: new PublicKey(order.onChainOrder),
+        });
+        if (!res.success) {
+          showToast('error', res.error || 'On-chain cancel failed');
+        } else {
+          showToast('success', `Chain cancel: ${res.signature.slice(0, 8)}…`);
+        }
+      } catch (err: any) {
+        showToast('error', err.message || 'On-chain cancel threw');
+      }
+    }
   };
 
-  const handleTakeOrder = (order: OrderPost) => {
+  const handleTakeOrder = async (order: OrderPost) => {
     const action = order.type === 'sell' ? t.orders.buy : t.orders.sell;
     showToast('success', `${t.orders.orderTaken} ${action} ${order.amount} ${coinData.symbol} @ ${order.price} ORA`);
     setOrders(prev => prev.filter(o => o.id !== order.id));
+    // Real-chain mirror — fires when the order was placed via the chain and
+    // we have both the order PDA and the seller (maker) wallet recorded.
+    if (onChain.enabled && onChain.module && order.type === 'sell'
+        && order.onChainOrder && order.onChainCreator && order.onChainMaker) {
+      try {
+        const res = await onChain.fillOrder({
+          creator: new PublicKey(order.onChainCreator),
+          order: new PublicKey(order.onChainOrder),
+          seller: new PublicKey(order.onChainMaker),
+          fillAmount: order.amount,
+        });
+        if (!res.success) {
+          showToast('error', res.error || 'On-chain fill failed');
+        } else {
+          showToast('success', `Chain fill: ${res.signature.slice(0, 8)}…`);
+        }
+      } catch (err: any) {
+        showToast('error', err.message || 'On-chain fill threw');
+      }
+    }
+  };
+
+  // Resolve the creator's Solana pubkey for chain calls. For the user's own
+  // coin this is the connected wallet; for foreign coins we look it up from
+  // matchedUser.walletAddress (when populated). Returns null when unknown,
+  // which causes the real-chain branch to silently skip.
+  const resolveCreatorPubkey = (): PublicKey | null => {
+    try {
+      if (isOwnCoinInit) return walletPublicKey ?? null;
+      const addr = (matchedUser as any)?.walletAddress as string | undefined;
+      if (addr) return new PublicKey(addr);
+      return null;
+    } catch {
+      return null;
+    }
   };
 
   // Mock data - in real app this would be fetched
@@ -530,11 +628,27 @@ export default function CoinDetailPage() {
       const numAmount = parseFloat(amount);
       if (tradeType === 'buy') {
         await mockChain.buyCreatorCoin('$' + coinData.symbol, numAmount);
+        // Real-chain mirror: primary_buy from creator's vault.
+        // Mock chain remains authoritative for display; we surface tx hash
+        // via toast when chain mode is on.
+        if (onChain.enabled && onChain.module && walletPublicKey) {
+          const creatorPk = resolveCreatorPubkey();
+          if (creatorPk) {
+            const res = await onChain.primaryBuy({ creator: creatorPk, amount: numAmount });
+            if (res.success && res.signature) {
+              showToast('success', `On-chain primary buy: ${res.signature.slice(0, 8)}…`);
+            } else if (!res.success) {
+              showToast('error', res.error || 'On-chain buy failed');
+            }
+          }
+        }
       } else {
         if (numAmount > heldAmount) {
           throw new Error(`You only hold ${heldAmount.toFixed(2)} ${coinData.symbol}`);
         }
         await mockChain.sellCreatorCoin('$' + coinData.symbol, numAmount, coinData.currentPrice);
+        // Real-chain sells go through createSellOrder (not a direct sell);
+        // the user can post a sell order via the Order Book to mirror this.
       }
       setIsTrading(false);
       setShowTradeSuccess(true);
@@ -547,6 +661,58 @@ export default function CoinDetailPage() {
 
   // Protocol fee is 5% of GROSS (amount × price), deducted from gross.
   const feeAmount = ((parseFloat(amount) || 0) * coinData.currentPrice) * 0.05;
+
+  // 2026-05-20 — friendly empty state for unknown coin URLs.
+  //
+  // Background: `/marketplace/coin/:id` resolves the URL `id` either to the
+  // current user's own minted coin (when `id.toUpperCase() === mockChain.
+  // creatorCoinSymbol.replace('$','').toUpperCase()`), or to a known mock
+  // creator by id/username/coin-symbol. If neither matches we used to
+  // silently fall back to a Maya Chen placeholder, which is confusing
+  // (e.g. judge demo user hits /marketplace/coin/JUDGE before they've
+  // minted → sees Maya Chen).
+  //
+  // Now: render a dedicated empty state pointing them to /creator-coin to
+  // mint, with a back-to-marketplace escape hatch. Only triggers when the
+  // URL is a non-empty id that resolves to nothing on either side.
+  const coinNotFound = !isOwnCoin && !matchedUser && !!id;
+  if (coinNotFound) {
+    const symLabel = (id || '').toUpperCase();
+    return (
+      <div className="min-h-screen bg-background">
+        <div className="sticky top-0 z-40 bg-background/95 backdrop-blur-md border-b border-border/40">
+          <div className="flex items-center gap-4 p-4 max-w-7xl mx-auto">
+            <Button variant="ghost" size="sm" onClick={goBack} className="shrink-0">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back
+            </Button>
+            <h1 className="text-base font-semibold">Creator coin</h1>
+          </div>
+        </div>
+        <div className="max-w-2xl mx-auto p-8">
+          <div className="bg-card border border-border rounded-2xl p-8 text-center">
+            <div className="text-5xl mb-4">🪙</div>
+            <h2 className="text-xl font-bold mb-2">
+              Creator coin <span className="font-mono">${symLabel}</span> doesn't exist yet
+            </h2>
+            <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
+              Either no creator has minted this symbol, or you arrived via a stale
+              link. If <span className="font-mono">${symLabel}</span> is supposed to be
+              <em>your</em> coin, mint it from the Creator Coin page first.
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <Button onClick={() => navigate('/creator-coin')} className="bg-[#14C8A8] hover:bg-[#0DA1A8] text-white">
+                Mint my Creator Coin
+              </Button>
+              <Button variant="outline" onClick={() => navigate('/marketplace')}>
+                Browse Marketplace
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -894,18 +1060,50 @@ export default function CoinDetailPage() {
             benefit={redeemTarget}
             symbol={coinData.symbol}
             creatorName={coinData.creator.name}
+            chainMode={
+              redemptionChain.enabled &&
+              !!resolveCreatorPubkey() &&
+              !!onChain.coinMint(resolveCreatorPubkey()!)
+            }
             onConfirm={async () => {
               if (!redeemTarget) return;
               // coinData.symbol is bare ticker (e.g. "IRIS"); chain storage uses "$IRIS".
               const fullSymbol = '$' + coinData.symbol;
+              // ── 1. Mock-chain bookkeeping (always runs) ────────────────
               try {
                 await mockChain.initiateRedemption(fullSymbol, redeemTarget, {
                   creatorName: coinData.creator.name,
                   creatorAvatar: coinData.creator.avatar,
                 });
-                showToast('success', `🔒 ${redeemTarget.threshold} ${fullSymbol} held in escrow — awaiting delivery from ${coinData.creator.name}.`);
               } catch (err: any) {
                 showToast('error', err.message || 'Redeem failed');
+                return;
+              }
+              showToast('success', `🔒 ${redeemTarget.threshold} ${fullSymbol} held in escrow — awaiting delivery from ${coinData.creator.name}.`);
+
+              // ── 2. Real-chain dispatch (best-effort, never blocks UI) ──
+              const creatorPk = resolveCreatorPubkey();
+              const mint = creatorPk ? onChain.coinMint(creatorPk) : null;
+              if (redemptionChain.enabled && creatorPk && mint) {
+                try {
+                  // Threshold is in human-readable CC; on-chain cost is in
+                  // base units (9 decimals).
+                  const cost = BigInt(Math.round(redeemTarget.threshold * 1e9));
+                  const r = await redemptionChain.initiateRedemption({
+                    coinMint: mint,
+                    creator: creatorPk,
+                    benefitId: Number(redeemTarget.id) || 0,
+                    cost,
+                  });
+                  if (!r.success) {
+                    console.warn('[CoinDetailPage] on-chain initiateRedemption failed:', r.error);
+                    showToast('info', `On-chain redemption skipped: ${r.error}`);
+                  } else {
+                    console.log('[CoinDetailPage] on-chain redemption tx:', r.signature);
+                  }
+                } catch (e: any) {
+                  console.warn('[CoinDetailPage] real-chain redemption threw:', e);
+                }
               }
             }}
           />

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("6h1sZi8cG3WNB2r9FqTkgoMLBBUPZWbyWPQ3mRsSPyAv");
+declare_id!("BU5dKjtXCPqCffJe7GaPR8Eu1pVfgWFLAUFeHcT8ENZA");
 
 const SECONDS_PER_DAY: i64 = 86400;
 
@@ -13,19 +13,22 @@ const SECONDS_PER_DAY: i64 = 86400;
 
 /// Program admin allowed to initialise / upgrade the staking pool.
 /// Mirrors `market::PROGRAM_ADMIN` pattern (bounty-V2 audit C-4).
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Hardcoded reward-vault authority. `claim_staking_reward.reward_vault` must
 /// be owned by this PDA to prevent attacker-controlled vault redirection.
 /// [audit fix C-S3] In production this is the canonical staking-rewards PDA
 /// (derivable from `seeds = [b"staking_pool"]`) — kept here as an explicit
 /// hardcoded address so any drift between contract & deployment is caught.
-pub const REWARD_VAULT_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const REWARD_VAULT_AUTHORITY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Hardcoded source treasury that feeds `update_daily_rewards`.
 /// [audit fix C-S2] Restricts where rewards flow IN from, so the admin can't
 /// "fund" the pool from a personal wallet to game accumulated_reward_per_weight.
-pub const REWARD_SOURCE_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const REWARD_SOURCE_TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix R2-M-S1] Codify the canonical ORA mint decimals so cross-
 /// program math stops drifting (livestream assumed 6 decimals, staking

@@ -42,7 +42,7 @@ pub use arbitration::*;
 pub mod committee;
 pub use committee::*;
 
-declare_id!("7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk");
+declare_id!("E9RGmKxpRKZ8hX5GnrgBq1aTayY7JGH5kzwBoN5RZxyT");
 
 const MAX_VOTE_WEIGHT: u64 = 10_000;
 
@@ -51,7 +51,8 @@ const MAX_VOTE_WEIGHT: u64 = 10_000;
 // system_program::ID; replace with the real AURA multisig pubkey pre-mainnet.
 // Mirrors `market::PROGRAM_ADMIN` (bounty-V2 audit C-4).
 // =============================================================================
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix M-G4] Maximum number of arbiters allowed to vote on a single
 /// legacy dispute. Caps the unbounded vote count.

@@ -1,5 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { useConnection } from '@solana/wallet-adapter-react';
+import { useOraContract } from '@/hooks/useOraContract';
+import { useStakingContract } from '@/hooks/useStakingContract';
+import type { StakeAccountOnChain } from '@/hooks/useStakingContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
+import { useChainTxHistory } from '@/hooks/useChainTxHistory';
+import { Radio } from 'lucide-react';
 import FeeBreakdown from '@/components/common/FeeBreakdown';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import {
@@ -122,6 +130,14 @@ function networkBadge(net: NetworkKind) {
 
 function explorerUrl(hash: string, net: NetworkKind) {
   if (net === 'mainnet-beta') return `https://explorer.solana.com/tx/${hash}`;
+  // 2026-05-19 Tier 2: when running against localnet, explorer.solana.com
+  // cannot resolve the tx (validator is on 127.0.0.1) — surface the
+  // signature in a `custom RPC` view that at least gives users a copyable
+  // link they can open against any indexer they have running.
+  const cluster = (import.meta as any).env?.VITE_SOLANA_CLUSTER as string | undefined;
+  if (cluster === 'localnet') {
+    return `https://explorer.solana.com/tx/${hash}?cluster=custom&customUrl=http%3A%2F%2F127.0.0.1%3A8899`;
+  }
   return `https://explorer.solana.com/tx/${hash}?cluster=${net}`;
 }
 
@@ -132,9 +148,131 @@ export default function WalletPage() {
   const buyOra = useBuyOra();
   const extras = mockChain as unknown as MockChainExtras;
 
-  const walletAddress = extras.walletAddress ?? 'AURAxxxxxxxxxxxxxxxxxxxxxxxx1234';
+  // ── Real-chain wiring (2026-05-19 Tier-1) ──
+  // We prefer the *unified wallet* (Privy embedded > Phantom) for the
+  // canonical wallet address whenever real-chain mode is on. The previous
+  // codepath read `extras.walletAddress` (a mock-chain string) which never
+  // matched the user's actual Solana address.
+  const onChain = useOraContract();
+  const staking = useStakingContract();
+  const uw = useUnifiedWallet();
+  const { connection } = useConnection();
+  // 2026-05-19 Tier 2 — best-effort on-chain tx history poll. Returns
+  // `{ txs: [], loading:false }` when real-chain mode is off, so we can
+  // unconditionally spread it into the History tab.
+  const chainHistory = useChainTxHistory();
+  const realChainEnabled = onChain.enabled && uw.publicKey !== null;
+  const liveChain = realChainEnabled;
+  const [chainOraBalance, setChainOraBalance] = useState<number | null>(null);
+  const [chainSolBalance, setChainSolBalance] = useState<number | null>(null);
+  const [chainBalanceErr, setChainBalanceErr] = useState<string | null>(null);
+
+  // Live on-chain stakes (real-chain mode). Each entry is a stake PDA + its
+  // parsed account state. We store the PDAs locally per user (localStorage)
+  // so we can re-hydrate them across reloads — the on-chain program doesn't
+  // expose a getProgramAccounts index, so callers must remember their PDAs.
+  const [chainStakes, setChainStakes] = useState<StakeAccountOnChain[]>([]);
+  const stakingLiveChain = staking.enabled && uw.publicKey !== null;
+  const stakeStorageKey = uw.publicKey ? `aura_chain_stakes:${uw.publicKey.toBase58()}` : null;
+
+  // walletAddress: prefer real on-chain pubkey when available; else fall back
+  // to the mock-chain string or the placeholder for fully-mock builds.
+  const walletAddress =
+    uw.publicKey?.toBase58()
+    ?? extras.walletAddress
+    ?? 'AURAxxxxxxxxxxxxxxxxxxxxxxxx1234';
   const network: NetworkKind = extras.network ?? 'devnet';
   const netBadge = networkBadge(network);
+
+  // Poll the live SPL+SOL balances whenever the on-chain wiring is active.
+  // 10s cadence is enough for a wallet view; we don't subscribe to the
+  // SPL token account because that would require a websocket subscription
+  // and isn't worth the complexity for a Tier-1 wire-up.
+  useEffect(() => {
+    if (!liveChain || !uw.publicKey) {
+      setChainOraBalance(null);
+      setChainSolBalance(null);
+      setChainBalanceErr(null);
+      return;
+    }
+    let cancelled = false;
+    const owner = uw.publicKey;
+    const tick = async () => {
+      try {
+        const [oraRaw, lamports] = await Promise.all([
+          onChain.getBalance(owner),
+          connection.getBalance(owner),
+        ]);
+        if (cancelled) return;
+        setChainOraBalance(Number(oraRaw) / Math.pow(10, onChain.decimals));
+        setChainSolBalance(lamports / LAMPORTS_PER_SOL);
+        setChainBalanceErr(null);
+      } catch (e) {
+        if (cancelled) return;
+        setChainBalanceErr(e instanceof Error ? e.message : String(e));
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [liveChain, uw.publicKey, onChain, connection]);
+
+  // ── Real-chain stake polling ──
+  // Reads tracked stake PDAs from localStorage and refreshes every 15s.
+  useEffect(() => {
+    if (!stakingLiveChain || !stakeStorageKey) {
+      setChainStakes([]);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const raw = window.localStorage.getItem(stakeStorageKey);
+      if (!raw) {
+        if (!cancelled) setChainStakes([]);
+        return;
+      }
+      let pdas: string[];
+      try {
+        pdas = JSON.parse(raw);
+        if (!Array.isArray(pdas)) pdas = [];
+      } catch {
+        pdas = [];
+      }
+      const results: StakeAccountOnChain[] = [];
+      for (const s of pdas) {
+        try {
+          const acc = await staking.fetchStake(new PublicKey(s));
+          if (acc) results.push(acc);
+        } catch {
+          /* stale PDA — drop silently */
+        }
+      }
+      if (!cancelled) setChainStakes(results);
+    };
+    tick();
+    const id = window.setInterval(tick, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [stakingLiveChain, stakeStorageKey, staking]);
+
+  // Sum of staked ORA from live chain (UI units).
+  const chainStakedOraTotal = useMemo(() => {
+    if (!stakingLiveChain) return null;
+    const sum = chainStakes.reduce((acc, s) => acc + s.amount, 0n);
+    return Number(sum) / 1e9;
+  }, [stakingLiveChain, chainStakes]);
+
+  // Effective balances: prefer live on-chain values when available,
+  // otherwise fall back to MockChainContext.
+  const displayedOraBalance =
+    liveChain && chainOraBalance != null ? chainOraBalance : mockChain.oraBalance;
+  const displayedSolBalance =
+    liveChain && chainSolBalance != null ? chainSolBalance : mockChain.solBalance;
 
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<'overview' | 'staking' | 'coins' | 'inventory' | 'history'>('overview');
@@ -223,8 +361,10 @@ export default function WalletPage() {
     Number.isFinite(sendAmountNum) && sendAmountNum > 0 && sendAmountNum > sendBalanceInfo.available;
 
   const stakeAmountNum = parseFloat(stakeAmount);
+  const stakedOraEffective =
+    stakingLiveChain && chainStakedOraTotal != null ? chainStakedOraTotal : mockChain.stakedOra;
   const stakeAvailable =
-    showStakeModal === 'stake' ? mockChain.oraBalance : mockChain.stakedOra;
+    showStakeModal === 'stake' ? displayedOraBalance : stakedOraEffective;
   const stakeOverBalance =
     Number.isFinite(stakeAmountNum) && stakeAmountNum > 0 && stakeAmountNum > stakeAvailable;
   const stakeBelowMin =
@@ -244,29 +384,69 @@ export default function WalletPage() {
       setStakeError(`Minimum stake is ${MIN_STAKE} ORA`);
       return;
     }
-    if (showStakeModal === 'stake' && amount > mockChain.oraBalance) {
+    if (showStakeModal === 'stake' && amount > displayedOraBalance) {
       setStakeError(
-        `Insufficient balance (you have ${mockChain.oraBalance.toFixed(4)} ORA)`,
+        `Insufficient balance (you have ${displayedOraBalance.toFixed(4)} ORA)`,
       );
       return;
     }
-    if (showStakeModal === 'unstake' && amount > mockChain.stakedOra) {
+    if (showStakeModal === 'unstake' && amount > stakedOraEffective) {
       setStakeError(
-        `Cannot unstake more than staked (${mockChain.stakedOra.toFixed(4)} ORA)`,
+        `Cannot unstake more than staked (${stakedOraEffective.toFixed(4)} ORA)`,
       );
       return;
     }
     setStakingLoading(true);
     try {
       if (showStakeModal === 'stake') {
-        if (typeof extras.stakeOraWithTier === 'function') {
+        if (stakingLiveChain) {
+          const res = await staking.stakeOra({ amount, lockDays: stakeTier });
+          if (!res.success) throw new Error(res.error || 'on-chain stake failed');
+          // Persist the new stake PDA so we can poll it later.
+          if (res.stake && stakeStorageKey) {
+            const cur = window.localStorage.getItem(stakeStorageKey);
+            let arr: string[] = [];
+            try { arr = cur ? JSON.parse(cur) : []; } catch { arr = []; }
+            arr.push(res.stake.toBase58());
+            window.localStorage.setItem(stakeStorageKey, JSON.stringify(arr));
+          }
+        } else if (typeof extras.stakeOraWithTier === 'function') {
           await extras.stakeOraWithTier(amount, stakeTier);
         } else {
           await mockChain.stakeOra(amount);
         }
         showToast('success', 'Stake submitted', `Staked ${amount} ORA for ${stakeTier} day(s)`);
       } else {
-        await mockChain.unstakeOra(amount);
+        if (stakingLiveChain) {
+          // On-chain unstake works per stake PDA. Pick the oldest stake whose
+          // amount covers the requested amount (UI doesn't currently support
+          // multi-PDA unstake — full-amount unstake of one PDA at a time).
+          const targetRaw = BigInt(Math.round(amount * 1e9));
+          const candidate = chainStakes
+            .slice()
+            .sort((a, b) => a.stakedAt - b.stakedAt)
+            .find((s) => s.amount >= targetRaw);
+          if (!candidate) {
+            throw new Error('No single stake covers that amount on-chain. Try a smaller amount or unstake individual entries.');
+          }
+          const res = await staking.unstakeOra({ stakeNonce: candidate.stakeNonce });
+          if (!res.success) throw new Error(res.error || 'on-chain unstake failed');
+          // Drop the closed PDA from local tracking.
+          if (stakeStorageKey) {
+            const cur = window.localStorage.getItem(stakeStorageKey);
+            try {
+              const arr: string[] = cur ? JSON.parse(cur) : [];
+              window.localStorage.setItem(
+                stakeStorageKey,
+                JSON.stringify(arr.filter((s) => s !== candidate.address.toBase58())),
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+        } else {
+          await mockChain.unstakeOra(amount);
+        }
         showToast('success', 'Unstake submitted', `${amount} ORA returning to your wallet`);
       }
       setShowStakeModal(null);
@@ -282,8 +462,27 @@ export default function WalletPage() {
 
   const handleClaimReward = async () => {
     try {
-      await mockChain.claimStakingReward();
-      showToast('success', 'Rewards claimed');
+      if (stakingLiveChain) {
+        if (chainStakes.length === 0) {
+          throw new Error('No on-chain stakes to claim from');
+        }
+        // Claim from each tracked stake. Best-effort — if one fails, surface
+        // the error but continue trying the rest.
+        let claimed = 0;
+        const errors: string[] = [];
+        for (const s of chainStakes) {
+          const res = await staking.claimReward({ stakeNonce: s.stakeNonce });
+          if (res.success) claimed += 1;
+          else errors.push(res.error || 'unknown');
+        }
+        if (claimed === 0) {
+          throw new Error(`All claims failed: ${errors.join('; ')}`);
+        }
+        showToast('success', `Claimed from ${claimed} stake(s)`);
+      } else {
+        await mockChain.claimStakingReward();
+        showToast('success', 'Rewards claimed');
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       showToast('error', 'Claim failed', msg);
@@ -310,7 +509,27 @@ export default function WalletPage() {
     setSendLoading(true);
     try {
       if (sendForm.token === 'ORA') {
-        await mockChain.sendOra(sendForm.recipient, amt);
+        // Real on-chain SPL transfer when wired up, otherwise mock chain.
+        if (liveChain) {
+          let to: PublicKey;
+          try {
+            to = new PublicKey(sendForm.recipient.trim());
+          } catch {
+            throw new Error('Recipient must be a valid Solana address');
+          }
+          const raw = BigInt(Math.round(amt * Math.pow(10, onChain.decimals)));
+          const res = await onChain.transfer({ to, amount: raw });
+          if (!res.success) throw new Error(res.error || 'on-chain transfer failed');
+          // Also push a mock-chain tx so the History tab reflects it locally.
+          // We don't await this — the on-chain tx already succeeded.
+          try {
+            await mockChain.sendOra(sendForm.recipient, amt);
+          } catch {
+            /* mock-side error is non-fatal */
+          }
+        } else {
+          await mockChain.sendOra(sendForm.recipient, amt);
+        }
       } else if (typeof extras.sendCreatorCoin === 'function') {
         await extras.sendCreatorCoin(sendForm.token, sendForm.recipient, amt);
       } else {
@@ -453,9 +672,30 @@ export default function WalletPage() {
     return { from, to };
   }, [historyDatePreset, historyDateFrom, historyDateTo]);
 
+  // 2026-05-19 Tier 2 — merge mock-chain history with real on-chain
+  // signatures discovered via getSignaturesForAddress. We dedupe by
+  // txHash so a Send that lives in both lists (we push to mockChain.sendOra
+  // after a successful on-chain transfer) shows up once with the mock's
+  // richer breakdown winning.
   const filteredTransactions = useMemo(() => {
     const { from, to } = historyRangeMs;
-    return mockChain.transactions
+    const mockSeenHashes = new Set(mockChain.transactions.map((t) => t.txHash));
+    // Coerce chain rows to the mock Transaction shape. The fields we don't
+    // know stay zero / 'on-chain' and the History tab handles those defaults.
+    const chainRows = chainHistory.txs
+      .filter((c) => !mockSeenHashes.has(c.txHash))
+      .map((c) => ({
+        id: c.id,
+        // We type chain.type as the union's catch-all 'send' so the rows
+        // pass through the filter dropdown without breaking the enum.
+        type: 'send' as const,
+        amount: c.amount,
+        timestamp: c.timestamp,
+        txHash: c.txHash,
+        details: c.details,
+      }));
+    const all = [...mockChain.transactions, ...chainRows];
+    return all
       .filter((tx) => (historyTypeFilter === 'all' ? true : tx.type === historyTypeFilter))
       .filter((tx) => {
         if (from !== null && tx.timestamp < from) return false;
@@ -464,7 +704,7 @@ export default function WalletPage() {
       })
       .slice() // copy before sort
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [mockChain.transactions, historyTypeFilter, historyRangeMs]);
+  }, [mockChain.transactions, chainHistory.txs, historyTypeFilter, historyRangeMs]);
 
   const isHistoryFiltered =
     historyTypeFilter !== 'all' ||
@@ -487,14 +727,24 @@ export default function WalletPage() {
       .join(' ');
 
   // Stakes list (synthesize from stakedOra if no stakes[] yet)
+  // 2026-05-19 Tier 1.5: when real-chain staking is on, render live stakes
+  // from the on-chain program instead of mock state. The shape is preserved
+  // so the StakingTab component doesn't need to know which source rendered.
   const stakesList: Array<{
     id: string;
     amount: number;
     lockDays: number;
     multiplier: number;
     startedAt: number;
-  }> =
-    extras.stakes && extras.stakes.length > 0
+  }> = stakingLiveChain && chainStakes.length > 0
+    ? chainStakes.map((s) => ({
+        id: s.address.toBase58(),
+        amount: Number(s.amount) / 1e9,
+        lockDays: Math.max(1, Math.round((s.unlockAt - s.stakedAt) / 86400)),
+        multiplier: s.multiplierBps / 10000,
+        startedAt: s.stakedAt * 1000,
+      }))
+    : (extras.stakes && extras.stakes.length > 0
       ? extras.stakes
       : mockChain.stakedOra > 0
         ? [
@@ -506,7 +756,7 @@ export default function WalletPage() {
               startedAt: Date.now() - 5 * DAY,
             },
           ]
-        : [];
+        : []);
 
   return (
     <ErrorBoundary>
@@ -566,6 +816,14 @@ export default function WalletPage() {
 
           {/* Overview */}
           <TabsContent value="overview" className="mt-6">
+            {liveChain && (
+              <div className="mb-4 px-4 py-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
+                <span className="font-bold uppercase tracking-wider text-[10px] bg-amber-200 dark:bg-amber-800 px-1.5 py-0.5 rounded">Demo</span>
+                <span>
+                  Only the <b>Portfolio</b> card above is live on-chain. Staking, NFTs, Creator Coins, and transaction history below are still demo data and will be wired in v0.2.
+                </span>
+              </div>
+            )}
             {/* 2026-05-11 R2 — 3×2 grid of equal-height cards. Staking moved
                to its own tab; this position now shows a lighter "Roles & Stake
                Summary" card. Min row height bumped per Zhuoyu so the cards
@@ -585,12 +843,14 @@ export default function WalletPage() {
                 handleCopyAddress={handleCopyAddress}
                 showBalance={showBalance}
                 setShowBalance={setShowBalance}
-                oraBalance={mockChain.oraBalance}
-                solBalance={mockChain.solBalance}
+                oraBalance={displayedOraBalance}
+                solBalance={displayedSolBalance}
                 ccCount={mockChain.creatorCoins.length}
                 txCount={mockChain.transactions.length}
                 onSend={() => setShowSendModal(true)}
                 onReceive={() => setShowReceive(true)}
+                liveChain={liveChain}
+                chainBalanceErr={chainBalanceErr}
               />
 
               <BuyOraInlineCard />
@@ -631,9 +891,9 @@ export default function WalletPage() {
              it needs (tier selector + my stakes list + role progression). */}
           <TabsContent value="staking" className="mt-6">
             <StakingTab
-              stakedOra={mockChain.stakedOra}
+              stakedOra={stakedOraEffective}
               stakingRewards={mockChain.stakingRewards}
-              availableOra={mockChain.oraBalance}
+              availableOra={displayedOraBalance}
               stakes={stakesList}
               showStakeModal={showStakeModal}
               setShowStakeModal={setShowStakeModal}
@@ -1420,6 +1680,8 @@ function PortfolioCard(props: {
   txCount: number;
   onSend: () => void;
   onReceive: () => void;
+  liveChain?: boolean;
+  chainBalanceErr?: string | null;
 }) {
   const shortenAddr = (addr: string) => addr ? `${addr.slice(0, 4)}...${addr.slice(-4)}` : '—';
   return (
@@ -1432,7 +1694,26 @@ function PortfolioCard(props: {
         </button>
       </div>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-lg font-bold">Portfolio</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-bold">Portfolio</h3>
+          {props.liveChain && (
+            <span
+              title={
+                props.chainBalanceErr
+                  ? `Live chain (last error: ${props.chainBalanceErr})`
+                  : 'Live balance — sourced from the ORA SPL token account on-chain'
+              }
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border ${
+                props.chainBalanceErr
+                  ? 'bg-orange-500/10 text-orange-600 border-orange-500/30'
+                  : 'bg-green-500/10 text-green-600 border-green-500/30'
+              }`}
+            >
+              <Radio className="w-2.5 h-2.5" />
+              {props.chainBalanceErr ? 'LIVE (err)' : 'LIVE'}
+            </span>
+          )}
+        </div>
         <button onClick={() => props.setShowBalance(!props.showBalance)} className="p-1.5 hover:bg-white/10 rounded-full">
           {props.showBalance ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
         </button>
@@ -1466,6 +1747,16 @@ function PortfolioCard(props: {
           <Download className="w-3.5 h-3.5 mr-1.5" /> Receive
         </Button>
       </div>
+      {props.liveChain && props.walletAddress && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(props.walletAddress) && (
+        <a
+          href={`https://explorer.solana.com/address/${props.walletAddress}?cluster=custom&customUrl=${encodeURIComponent('http://127.0.0.1:8899')}`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="mt-2 inline-flex items-center justify-center gap-1 text-[10px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+        >
+          <ExternalLink className="w-3 h-3" /> View on Solana Explorer (localnet)
+        </a>
+      )}
     </div>
   );
 }

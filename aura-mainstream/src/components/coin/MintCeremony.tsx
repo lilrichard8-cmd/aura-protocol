@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { X, Sparkles, Lock, Coins, Flame, TrendingUp, Shield, ArrowRight, Check, Loader2, Upload, Gift, Zap, Plus, Trash2, Image as ImageIcon } from 'lucide-react';
 import { useMockChain, type CoinBenefit } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
+import { useCreatorCoinContract } from '@/hooks/useCreatorCoinContract';
 
 interface MintCeremonyProps {
   open: boolean;
@@ -26,6 +27,8 @@ const PHASE_ORDER: Phase[] = ['identity', 'benefits', 'terms', 'minting', 'compl
 export default function MintCeremony({ open, defaultSymbol = 'JUDGE', defaultName = 'Judge Coin', onClose, onMinted }: MintCeremonyProps) {
   const mockChain = useMockChain();
   const { showToast } = useToast();
+  // Real-chain bridge — only fires when VITE_CREATOR_COIN_REAL_CHAIN=true.
+  const onChain = useCreatorCoinContract();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [phase, setPhase] = useState<Phase>('identity');
   const [symbol, setSymbol] = useState(defaultSymbol);
@@ -123,7 +126,22 @@ export default function MintCeremony({ open, defaultSymbol = 'JUDGE', defaultNam
         benefits: cleanBenefits.length > 0 ? cleanBenefits : undefined,
         initialPrice,
       });
-      const hex = Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+      // Real-chain mirror: when the flag is on we fire the on-chain mint in
+      // parallel and use the resulting signature as the displayed tx hash.
+      // Falls back to a random hex string when chain mode is disabled.
+      let hex = Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+      if (onChain.enabled && onChain.module) {
+        try {
+          const res = await onChain.createCreatorCoin({ symbol, initialPrice });
+          if (res.success && res.signature) {
+            hex = res.signature;
+          } else if (!res.success) {
+            showToast('error', res.error || 'On-chain mint failed (mock state preserved)');
+          }
+        } catch (err: any) {
+          showToast('error', err?.message || 'On-chain mint threw');
+        }
+      }
       setTxHash(hex);
       setMintedSymbol(result.symbol);
       setPhase('complete');

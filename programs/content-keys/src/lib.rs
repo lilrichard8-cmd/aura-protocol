@@ -34,7 +34,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("CX6wqdXrR1C8sz8A7DWJ8fE2utXHivif7j1ie91i8Y3v");
+declare_id!("HCZyqzGVjmUKfUfztmL4ceeZkw3Pm5spdsBjWQ4yaHqT");
 
 // ╔══════════════════════════════════════════════════════════════════════╗
 // ║  ⚠️ ⚠️ ⚠️  DO NOT DEPLOY TO MAINNET  ⚠️ ⚠️ ⚠️                              ║
@@ -49,19 +49,24 @@ declare_id!("CX6wqdXrR1C8sz8A7DWJ8fE2utXHivif7j1ie91i8Y3v");
 /// [whitepaper-sync v1.1] §13 content-keys — Program admin allowed to rotate
 /// (future) protocol-controlled parameters. Mirrors market::PROGRAM_ADMIN.
 /// ⚠️ DO NOT DEPLOY — placeholder = system program ID.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [whitepaper-sync v1.1] §13 content-keys — Canonical ORA mint. All buys
 /// and royalty payments are denominated in ORA atomic units.
 /// ⚠️ DO NOT DEPLOY — placeholder = system program ID.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// [whitepaper-sync v1.1] §13 content-keys — Protocol fee pools (ORA-only).
 /// Identical pubkeys to `programs/market` so off-chain accounting stays
 /// consistent across modules. ⚠️ DO NOT DEPLOY — placeholders.
-pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: 9byFYXdRziBe6huCRCsExz65eJMJRxkLPNReTYPzCiHS
+pub const STAKING_REWARDS_POOL: Pubkey = Pubkey::new_from_array([127, 210, 216, 137, 107, 161, 33, 182, 172, 186, 167, 117, 190, 40, 215, 32, 84, 56, 69, 15, 197, 164, 130, 140, 59, 246, 11, 42, 77, 87, 94, 69]);
+// [local-deploy 2026-05-19] real address on localnet: G9faGRWp35cDnGZdE38zwTisErASpYGoYcCKDvY3CPEE
+pub const GAS_RESERVE_POOL: Pubkey = Pubkey::new_from_array([225, 23, 144, 204, 122, 29, 73, 91, 161, 241, 10, 117, 27, 233, 253, 109, 104, 15, 163, 59, 61, 24, 233, 119, 245, 67, 128, 29, 70, 173, 249, 143]);
+// [local-deploy 2026-05-19] real address on localnet: FcpiWgjWuA39CMZfahxhDSMUGUavB4kVHjuovGvAxr1f
+pub const OPS_TREASURY_POOL: Pubkey = Pubkey::new_from_array([217, 48, 229, 202, 178, 131, 49, 202, 84, 203, 0, 200, 144, 206, 29, 150, 143, 191, 101, 210, 58, 17, 161, 63, 138, 132, 39, 227, 12, 173, 122, 146]);
 
 // ─── Fee constants (WP §5.7 / Numbers Handbook §5) ──────────────────────────
 

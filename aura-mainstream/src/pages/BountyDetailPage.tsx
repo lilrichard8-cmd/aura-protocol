@@ -15,12 +15,15 @@
  * the winning submission once decided).
  */
 
-import { useMemo, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Calendar, Users, Upload, Coins, Clock,
   Briefcase, AlertCircle, Send, FileText, CheckCircle2, XCircle,
+  Award, Ban, RefreshCw, Link as LinkIcon,
 } from 'lucide-react';
+import { PublicKey } from '@solana/web3.js';
+import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useMockChain } from '@/context/MockChainContext';
 import { useGoBack } from '@/hooks/useGoBack';
 import UserAvatar from '@/components/UserAvatar';
@@ -29,6 +32,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/context/ToastContext';
+import { useBountyContract, MARKET_PROGRAM_ID, BountyStatus, BOUNTY_V2_LIMITS, type BountyOnChain, type SubmissionOnChain, SubmissionStatus } from '@/hooks/useBountyContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 
 function formatDeadline(deadline?: string): { text: string; expired: boolean; soon: boolean } {
   if (!deadline) return { text: 'No deadline set', expired: false, soon: false };
@@ -57,33 +62,348 @@ function formatDate(d: string | number | undefined): string {
   });
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Bounty identity strategy (2026-05-19):
+//   • URL path `/marketplace/bounty/:id` — `id` is the *mock* bounty id
+//     (e.g. "bounty-1"). This is the default and unchanged.
+//   • URL query `?pda=<base58>` — when present AND VITE_BOUNTY_REAL_CHAIN
+//     is enabled, we treat the page as a *real on-chain* bounty and fetch
+//     account state via MarketModule.fetchBounty.
+//   • Both can technically coexist (`/marketplace/bounty/x?pda=…`); when
+//     pda is set + on-chain mode is on, the pda branch wins.
+// ───────────────────────────────────────────────────────────────────────
+
+/**
+ * H-3 — Decode a `data:text/plain;base64,...` metadata URI back into the
+ * plain text the creator originally typed. Falls back to the URI verbatim
+ * for anything else (future IPFS / HTTPS / etc.) so we never blow up.
+ */
+function decodeMetadataUri(uri: string): string {
+  if (!uri) return '';
+  if (uri.startsWith('data:text/plain;base64,')) {
+    try {
+      // eslint-disable-next-line deprecation/deprecation
+      return decodeURIComponent(escape(atob(uri.slice('data:text/plain;base64,'.length))));
+    } catch {
+      return uri;
+    }
+  }
+  return uri;
+}
+
+/** Normalizes a chain bounty into the same shape used by the mock UI so
+ *  the existing render code keeps working. */
+function normalizeChainBounty(b: BountyOnChain): {
+  id: string;
+  title: string;
+  description: string;
+  reward: number;
+  deadline: string;
+  submissionCount: number;
+  status: 'active' | 'completed' | 'expired';
+  creator: string;
+} {
+  const reward = Number(b.totalReward) / 1_000_000_000; // assume 9 decimals
+  let status: 'active' | 'completed' | 'expired';
+  switch (b.status) {
+    case BountyStatus.Open:
+      status = 'active'; break;
+    case BountyStatus.FullyAwarded:
+    case BountyStatus.Closed:
+      status = 'completed'; break;
+    case BountyStatus.Expired:
+    case BountyStatus.Cancelled:
+      status = 'expired'; break;
+    default:
+      status = 'active';
+  }
+  return {
+    id: b.address.toBase58(),
+    title: b.title,
+    // H-3 — decode the base64 data URI so the brief is readable instead of
+    // a wall of base64 chars. Long URIs (IPFS / HTTPS) pass through.
+    description: decodeMetadataUri(b.metadataUri || ''),
+    reward,
+    deadline: new Date(b.deadline * 1000).toISOString(),
+    submissionCount: b.submissionCount,
+    status,
+    creator: b.sponsor.toBase58(),
+  };
+}
+
+// H-4 — Local index of submissions the current browser session has seen.
+// Two sources feed this index:
+//   1. Just-submitted PDAs written by the submitter on success (so the
+//      creator-side flow can pick them up after a refresh in the same
+//      browser).
+//   2. The cross-browser path: `getProgramAccounts` with a memcmp filter
+//      on the BountySubmission discriminator + bounty PublicKey. This is
+//      O(n) over all BountySubmission accounts but on localnet that's fine.
+const SUBMISSIONS_STORAGE_PREFIX = 'aura_my_submissions:';
+
+type StoredSubmission = {
+  pda: string;
+  submitterPubkey: string;
+  submittedAt: number; // unix seconds
+  workUrl?: string;
+};
+
+function loadStoredSubmissions(bountyPda: string): StoredSubmission[] {
+  try {
+    const raw = window.localStorage.getItem(SUBMISSIONS_STORAGE_PREFIX + bountyPda);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s: unknown): s is StoredSubmission => {
+      return !!s && typeof s === 'object'
+        && typeof (s as StoredSubmission).pda === 'string'
+        && typeof (s as StoredSubmission).submitterPubkey === 'string';
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredSubmissions(bountyPda: string, list: StoredSubmission[]): void {
+  try {
+    window.localStorage.setItem(
+      SUBMISSIONS_STORAGE_PREFIX + bountyPda,
+      JSON.stringify(list),
+    );
+  } catch {
+    // QuotaExceeded etc. — silently drop; the on-chain fallback still works.
+  }
+}
+
+function recordOwnSubmission(
+  bountyPda: string,
+  entry: StoredSubmission,
+): void {
+  const existing = loadStoredSubmissions(bountyPda);
+  if (existing.some(e => e.pda === entry.pda)) return;
+  saveStoredSubmissions(bountyPda, [...existing, entry]);
+}
+
+/** Truncates a base58 pubkey for inline display. */
+function shortPk(addr: string): string {
+  if (addr.length <= 12) return addr;
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
 export default function BountyDetailPage() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const goBack = useGoBack('/studio?tab=bounties');
   const mockChain = useMockChain();
   const { showToast } = useToast();
+  const onChain = useBountyContract();
+  const wallet = useWallet();
+  const unified = useUnifiedWallet();
+  const { connection } = useConnection();
 
-  const bounty = useMemo(
-    () => mockChain.bounties.find(b => b.id === id),
-    [mockChain.bounties, id],
+  // Parse and validate the optional ?pda= param. If on-chain mode is off
+  // we still pretend the param doesn't exist (mock fallback) to avoid
+  // confusing users when the feature flag is disabled.
+  const pdaParam = searchParams.get('pda');
+  const bountyPda = useMemo<PublicKey | null>(() => {
+    if (!pdaParam) return null;
+    try {
+      return new PublicKey(pdaParam);
+    } catch {
+      return null;
+    }
+  }, [pdaParam]);
+  const useRealChain = !!(onChain.enabled && onChain.module && bountyPda);
+
+  // Chain-bounty state (only used in on-chain mode).
+  const [chainBounty, setChainBounty] = useState<BountyOnChain | null>(null);
+  const [chainBountyLoading, setChainBountyLoading] = useState<boolean>(useRealChain);
+  const [chainBountyError, setChainBountyError] = useState<string | null>(null);
+  // Bump this to force a re-fetch after a successful action.
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!useRealChain || !onChain.module || !bountyPda) {
+      setChainBounty(null);
+      setChainBountyLoading(false);
+      setChainBountyError(null);
+      return;
+    }
+    setChainBountyLoading(true);
+    setChainBountyError(null);
+    onChain.module.fetchBounty(bountyPda)
+      .then(b => {
+        if (cancelled) return;
+        if (!b) {
+          setChainBountyError('Bounty account not found on-chain.');
+          setChainBounty(null);
+        } else {
+          setChainBounty(b);
+        }
+      })
+      .catch(e => {
+        if (cancelled) return;
+        setChainBountyError(e?.message || 'Failed to load bounty from chain.');
+      })
+      .finally(() => {
+        if (!cancelled) setChainBountyLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [useRealChain, onChain.module, bountyPda, refreshKey]);
+
+  const mockBounty = useMemo(
+    () => useRealChain ? undefined : mockChain.bounties.find(b => b.id === id),
+    [useRealChain, mockChain.bounties, id],
   );
 
-  // The current user's submissions to this bounty (if any). The chain
-  // doesn't expose other users' submissions for in-flight bounties —
-  // that's by design (sealed-bid auction model).
+  // The unified bounty object the UI renders against — either the normalized
+  // chain bounty or the mock one.
+  const bounty = useMemo(
+    () => useRealChain
+      ? (chainBounty ? normalizeChainBounty(chainBounty) : undefined)
+      : mockBounty,
+    [useRealChain, chainBounty, mockBounty],
+  );
+
+  // The current user's submissions to this bounty (if any).
+  //  • Mock mode: read from mockChain.mySubmissions.
+  //  • Real chain: the program doesn't surface submissions without an
+  //    indexer, so the list stays empty here. Submitters get tx-level
+  //    feedback via toast instead. Future: read program accounts.
   const mySubmissions = useMemo(
-    () => bounty
+    () => (!useRealChain && bounty)
       ? mockChain.mySubmissions
           .filter(s => s.bountyId === bounty.id)
           .sort((a, b) => b.submittedAt - a.submittedAt)
       : [],
-    [mockChain.mySubmissions, bounty],
+    [useRealChain, mockChain.mySubmissions, bounty],
   );
 
   const [workUrl, setWorkUrl] = useState('');
   const [note, setNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // On-chain creator action state (award / cancel / refund / reject).
+  const [awardSubPda, setAwardSubPda] = useState('');
+  const [awardAmount, setAwardAmount] = useState('');
+  const [actionBusy, setActionBusy] = useState<null | 'award' | 'reject' | 'cancel' | 'refund'>(null);
+
+  // H-4 — On-chain submission discovery.
+  //
+  // The contract doesn't expose a `listSubmissions(bounty)` RPC, so we
+  // discover submissions two ways:
+  //   (a) Cross-browser: `connection.getProgramAccounts` with a memcmp
+  //       on the BountySubmission discriminator + the bounty PublicKey.
+  //       (Discriminator lives at offset 0; bounty pubkey at offset 8.)
+  //   (b) Same-browser fallback: localStorage cache populated by the
+  //       submitter at submit-time.
+  // Both sources merge into a single deduplicated list keyed by PDA.
+  const [chainSubmissions, setChainSubmissions] = useState<SubmissionOnChain[]>([]);
+  const [submissionsLoading, setSubmissionsLoading] = useState(false);
+  const [submissionsError, setSubmissionsError] = useState<string | null>(null);
+  const [storedSubmissionRefs, setStoredSubmissionRefs] = useState<StoredSubmission[]>([]);
+
+  // Refresh the localStorage view whenever the bounty key changes or we bump
+  // refreshKey. localStorage is synchronous so this is cheap.
+  useEffect(() => {
+    if (!useRealChain || !bountyPda) {
+      setStoredSubmissionRefs([]);
+      return;
+    }
+    setStoredSubmissionRefs(loadStoredSubmissions(bountyPda.toBase58()));
+  }, [useRealChain, bountyPda, refreshKey]);
+
+  // Pull live on-chain submissions via getProgramAccounts.
+  useEffect(() => {
+    let cancelled = false;
+    if (!useRealChain || !onChain.module || !bountyPda) {
+      setChainSubmissions([]);
+      setSubmissionsLoading(false);
+      setSubmissionsError(null);
+      return () => { cancelled = true; };
+    }
+    setSubmissionsLoading(true);
+    setSubmissionsError(null);
+    (async () => {
+      try {
+        // Layout: discriminator(8) + bounty(32) + submitter(32) + …
+        // We filter on the bounty pubkey at offset 8.
+        const accounts = await connection.getProgramAccounts(
+          MARKET_PROGRAM_ID,
+          {
+            filters: [
+              { memcmp: { offset: 8, bytes: bountyPda.toBase58() } },
+            ],
+          },
+        );
+        const parsed: SubmissionOnChain[] = [];
+        for (const { pubkey, account } of accounts) {
+          try {
+            const sub = await onChain.module!.fetchSubmission(pubkey);
+            if (sub && sub.bounty.equals(bountyPda)) {
+              parsed.push(sub);
+            }
+          } catch {
+            // Account matched memcmp but failed to parse (likely not a
+            // BountySubmission — different discriminator). Skip.
+            void account;
+          }
+        }
+        // Newest first.
+        parsed.sort((a, b) => b.submittedAt - a.submittedAt);
+        if (!cancelled) setChainSubmissions(parsed);
+      } catch (e) {
+        if (!cancelled) {
+          setSubmissionsError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        if (!cancelled) setSubmissionsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [useRealChain, onChain.module, bountyPda, connection, refreshKey]);
+
+  // Merge on-chain submissions + localStorage refs (the on-chain ones win
+  // because they have the full SubmissionOnChain data, including status
+  // and awarded amount).
+  const mergedChainSubmissions = useMemo(() => {
+    const byPda = new Map<string, SubmissionOnChain>();
+    for (const s of chainSubmissions) {
+      byPda.set(s.address.toBase58(), s);
+    }
+    // For local-only refs not yet visible on-chain (RPC lag), surface them
+    // as a stub so the creator at least sees "pending" rows.
+    const stubs: { pda: string; submitter: string; submittedAt: number; status: 'unknown' }[] = [];
+    for (const ref of storedSubmissionRefs) {
+      if (!byPda.has(ref.pda)) {
+        stubs.push({
+          pda: ref.pda,
+          submitter: ref.submitterPubkey,
+          submittedAt: ref.submittedAt,
+          status: 'unknown',
+        });
+      }
+    }
+    return {
+      onChain: Array.from(byPda.values()),
+      stubs,
+    };
+  }, [chainSubmissions, storedSubmissionRefs]);
+
+  // On-chain loading state.
+  if (useRealChain && chainBountyLoading) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-12 text-center space-y-3">
+        <RefreshCw className="w-6 h-6 mx-auto text-muted-foreground animate-spin" />
+        <p className="text-sm text-muted-foreground">Loading bounty from chain…</p>
+        <p className="text-[11px] text-muted-foreground/70 font-mono break-all">
+          {bountyPda?.toBase58()}
+        </p>
+      </div>
+    );
+  }
 
   // 404 — bounty doesn't exist (probably stale link or already deleted).
   if (!bounty) {
@@ -94,8 +414,9 @@ export default function BountyDetailPage() {
         </div>
         <h1 className="text-xl font-bold">Bounty not found</h1>
         <p className="text-sm text-muted-foreground">
-          This bounty doesn't exist (or was removed). It may have been deleted by its creator
-          or you may be following a stale link.
+          {chainBountyError
+            ? chainBountyError
+            : "This bounty doesn't exist (or was removed). It may have been deleted by its creator or you may be following a stale link."}
         </p>
         <div className="flex items-center justify-center gap-2 pt-2">
           <Button variant="outline" onClick={goBack}>Back</Button>
@@ -108,11 +429,18 @@ export default function BountyDetailPage() {
   }
 
   const deadlineInfo = formatDeadline(bounty.deadline);
-  const isCreator = bounty.creator === mockChain.publicKey;
+  // Creator check: in on-chain mode compare to unified wallet pubkey
+  // (covers Privy embedded + Phantom); otherwise to mockChain.publicKey.
+  const walletPk58 = unified.publicKey?.toBase58() ?? wallet.publicKey?.toBase58();
+  const isCreator = useRealChain
+    ? !!(walletPk58 && walletPk58 === bounty.creator)
+    : bounty.creator === mockChain.publicKey;
   const canSubmit =
     !isCreator
     && bounty.status === 'active'
-    && !deadlineInfo.expired;
+    && !deadlineInfo.expired
+    // In on-chain mode, the wallet must be connected.
+    && (!useRealChain || (onChain.module && (unified.connected || wallet.connected)));
 
   const handleSubmission = async () => {
     if (!workUrl.trim()) {
@@ -121,14 +449,130 @@ export default function BountyDetailPage() {
     }
     setIsSubmitting(true);
     try {
-      await mockChain.submitBountyWork(bounty.id, workUrl.trim(), note.trim() || undefined);
-      showToast('success', 'Submission sent', 'The bounty creator can now review it.');
+      if (useRealChain && onChain.module && bountyPda) {
+        const uri = workUrl.trim().slice(0, BOUNTY_V2_LIMITS.SUBMISSION_URI_MAX);
+        if (uri.length === 0) throw new Error('Empty work URL.');
+        const res = await onChain.module.submitWork({ bounty: bountyPda, contentUri: uri });
+        if (!res.success) throw new Error(res.error || 'on-chain submit failed');
+        // H-4 — Persist the submission PDA + submitter so this browser can
+        // surface it without depending on getProgramAccounts (which may lag
+        // on slow RPC). The creator-side flow in another browser uses
+        // getProgramAccounts instead.
+        if (res.submission && (unified.publicKey || wallet.publicKey)) {
+          recordOwnSubmission(bountyPda.toBase58(), {
+            pda: res.submission.toBase58(),
+            submitterPubkey: (unified.publicKey ?? wallet.publicKey!).toBase58(),
+            submittedAt: Math.floor(Date.now() / 1000),
+            workUrl: uri,
+          });
+        }
+        showToast(
+          'success',
+          'Submission sent on-chain',
+          `tx: ${res.signature.slice(0, 8)}…${res.submission ? ` · submission ${res.submission.toBase58().slice(0, 8)}…` : ''}`,
+        );
+        // Note field is ignored on-chain (program only stores contentUri).
+        if (note.trim()) {
+          showToast('info', 'Note skipped', 'The on-chain contract only stores the work URL. Add context inside the link instead.');
+        }
+      } else {
+        await mockChain.submitBountyWork(bounty.id, workUrl.trim(), note.trim() || undefined);
+        showToast('success', 'Submission sent', 'The bounty creator can now review it.');
+      }
       setWorkUrl('');
       setNote('');
+      setRefreshKey(k => k + 1);
     } catch (e: any) {
       showToast('error', 'Submission failed', e?.message || 'Try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // ── Creator-only on-chain actions ─────────────────────────────────────
+  const parseSubmissionPda = (s: string): PublicKey | null => {
+    try { return new PublicKey(s.trim()); } catch { return null; }
+  };
+
+  const handleAward = async () => {
+    if (!useRealChain || !onChain.module || !bountyPda) return;
+    const sub = parseSubmissionPda(awardSubPda);
+    if (!sub) {
+      showToast('error', 'Invalid submission PDA', 'Paste the base58 pubkey of the submission account.');
+      return;
+    }
+    const amt = Number(awardAmount);
+    if (!Number.isFinite(amt) || amt < BOUNTY_V2_LIMITS.MIN_AWARD_AMOUNT) {
+      showToast('error', 'Invalid amount', `Award must be at least ${BOUNTY_V2_LIMITS.MIN_AWARD_AMOUNT} ORA.`);
+      return;
+    }
+    setActionBusy('award');
+    try {
+      const gross = BigInt(Math.floor(amt)) * 1_000_000_000n; // 9 decimals
+      const res = await onChain.module.awardSubmission({
+        bounty: bountyPda,
+        submission: sub,
+        grossAmount: gross,
+      });
+      if (!res.success) throw new Error(res.error || 'award failed');
+      showToast('success', 'Submission awarded', `tx: ${res.signature.slice(0, 8)}… · winner net = gross × 0.95`);
+      setAwardSubPda(''); setAwardAmount('');
+      setRefreshKey(k => k + 1);
+    } catch (e: any) {
+      showToast('error', 'Award failed', e?.message || 'Try again.');
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!useRealChain || !onChain.module || !bountyPda) return;
+    const sub = parseSubmissionPda(awardSubPda);
+    if (!sub) {
+      showToast('error', 'Invalid submission PDA', 'Paste the base58 pubkey of the submission account.');
+      return;
+    }
+    setActionBusy('reject');
+    try {
+      const res = await onChain.module.rejectSubmission(bountyPda, sub);
+      if (!res.success) throw new Error(res.error || 'reject failed');
+      showToast('success', 'Submission rejected', `tx: ${res.signature.slice(0, 8)}…`);
+      setAwardSubPda(''); setAwardAmount('');
+      setRefreshKey(k => k + 1);
+    } catch (e: any) {
+      showToast('error', 'Reject failed', e?.message || 'Try again.');
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!useRealChain || !onChain.module || !bountyPda) return;
+    setActionBusy('cancel');
+    try {
+      const res = await onChain.module.cancelBounty(bountyPda);
+      if (!res.success) throw new Error(res.error || 'cancel failed');
+      showToast('success', 'Bounty cancelled', `Escrow refunded to sponsor. tx: ${res.signature.slice(0, 8)}…`);
+      setRefreshKey(k => k + 1);
+    } catch (e: any) {
+      showToast('error', 'Cancel failed', e?.message || 'Try again.');
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const handleRefund = async () => {
+    if (!useRealChain || !onChain.module || !bountyPda) return;
+    setActionBusy('refund');
+    try {
+      const res = await onChain.module.refundExpired(bountyPda);
+      if (!res.success) throw new Error(res.error || 'refund failed');
+      showToast('success', 'Refund triggered', `Escrow returned to sponsor. tx: ${res.signature.slice(0, 8)}…`);
+      setRefreshKey(k => k + 1);
+    } catch (e: any) {
+      showToast('error', 'Refund failed', e?.message || 'Try again.');
+    } finally {
+      setActionBusy(null);
     }
   };
 
@@ -344,8 +788,226 @@ export default function BountyDetailPage() {
         </div>
       )}
 
-      {/* Creator-only note */}
-      {isCreator && (
+      {/* H-4 — Submissions list (creator view, on-chain mode). Surfaces all
+          submission PDAs against this bounty so the creator can click to
+          select instead of hand-copying from a toast. */}
+      {isCreator && useRealChain && bountyPda && (
+        <div className="bg-card rounded-2xl border shadow-sm p-6 space-y-3">
+          <div className="flex items-center gap-2">
+            <Users className="w-4 h-4 text-aura" />
+            <h2 className="text-sm font-semibold">Submissions to review</h2>
+            <Badge variant="outline" className="text-[10px] ml-auto">
+              {submissionsLoading
+                ? 'loading…'
+                : `${mergedChainSubmissions.onChain.length + mergedChainSubmissions.stubs.length} found`}
+            </Badge>
+            <button
+              onClick={() => setRefreshKey(k => k + 1)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Refresh submissions"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${submissionsLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+          {submissionsError && (
+            <p className="text-[11px] text-amber-500">
+              Submission discovery failed: {submissionsError}. Falling back to local cache.
+            </p>
+          )}
+          {!submissionsLoading
+            && mergedChainSubmissions.onChain.length === 0
+            && mergedChainSubmissions.stubs.length === 0 && (
+            <p className="text-xs text-muted-foreground italic">
+              No submissions yet. Share the bounty URL with potential submitters.
+            </p>
+          )}
+          <ul className="space-y-2">
+            {mergedChainSubmissions.onChain.map(s => {
+              const pda58 = s.address.toBase58();
+              const selected = awardSubPda.trim() === pda58;
+              const statusBadge = (() => {
+                switch (s.status) {
+                  case SubmissionStatus.Awarded:
+                    return <Badge className="bg-green-500/15 text-green-600 dark:text-green-400 border-green-500/30"><Award className="w-3 h-3 mr-1" /> Awarded</Badge>;
+                  case SubmissionStatus.Rejected:
+                    return <Badge variant="outline" className="text-muted-foreground"><XCircle className="w-3 h-3 mr-1" /> Rejected</Badge>;
+                  default:
+                    return <Badge variant="outline" className="text-amber-600 dark:text-amber-400 border-amber-500/40"><Clock className="w-3 h-3 mr-1" /> Pending</Badge>;
+                }
+              })();
+              return (
+                <li
+                  key={pda58}
+                  className={
+                    'rounded-xl border px-4 py-3 cursor-pointer transition-colors ' +
+                    (selected
+                      ? 'border-aura bg-aura/10'
+                      : 'border-border/60 bg-muted/30 hover:bg-muted/50')
+                  }
+                  onClick={() => setAwardSubPda(pda58)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-center gap-2 text-xs font-semibold">
+                        <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                        {s.contentUri ? (
+                          <a
+                            href={s.contentUri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={e => e.stopPropagation()}
+                            className="hover:text-aura hover:underline truncate"
+                          >
+                            {s.contentUri}
+                          </a>
+                        ) : (
+                          <span className="italic text-muted-foreground">no link provided</span>
+                        )}
+                      </div>
+                      <p className="text-[10px] font-mono text-muted-foreground/80 truncate">
+                        {shortPk(pda58)} · by {shortPk(s.submitter.toBase58())}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground/70">
+                        Submitted {formatDate(s.submittedAt * 1000)}
+                        {s.status === SubmissionStatus.Awarded && s.awardedAmount > 0n && (
+                          <> · Awarded {(Number(s.awardedAmount) / 1_000_000_000).toLocaleString()} ORA</>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex-shrink-0">{statusBadge}</div>
+                  </div>
+                </li>
+              );
+            })}
+            {mergedChainSubmissions.stubs.map(s => (
+              <li
+                key={s.pda}
+                className="rounded-xl border border-dashed border-border/60 bg-muted/20 px-4 py-3 cursor-pointer transition-colors hover:bg-muted/40"
+                onClick={() => setAwardSubPda(s.pda)}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold inline-flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+                      Local reference
+                    </p>
+                    <p className="text-[10px] font-mono text-muted-foreground/80">
+                      {shortPk(s.pda)} · by {shortPk(s.submitter)}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground/70">
+                      Cached locally · {formatDate(s.submittedAt * 1000)}
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="text-[10px]">cached</Badge>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-muted-foreground/70 leading-tight">
+            Click a row to select it for award/reject below.
+          </p>
+        </div>
+      )}
+
+      {/* Creator-only on-chain actions — only renders when useRealChain. */}
+      {isCreator && useRealChain && bountyPda && (
+        <div className="bg-aura/5 border border-aura/30 rounded-2xl p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Briefcase className="w-4 h-4 text-aura" />
+            <h2 className="text-sm font-semibold">Manage this bounty (on-chain)</h2>
+            <Badge variant="outline" className="text-[10px] ml-auto">
+              <LinkIcon className="w-2.5 h-2.5 mr-1" /> real chain
+            </Badge>
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Pick a submission from the list above (or paste a PDA manually) to award
+            (release escrow) or reject. Cancel or refund returns escrow to you.
+          </p>
+
+          {/* Award / Reject row */}
+          {bounty.status === 'active' && (
+            <div className="space-y-2">
+              <label className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground block">
+                Submission PDA <span className="font-normal normal-case opacity-70">(auto-filled when you click a row above)</span>
+              </label>
+              <Input
+                placeholder="base58 pubkey of submission account"
+                value={awardSubPda}
+                onChange={e => setAwardSubPda(e.target.value)}
+                className="text-xs font-mono"
+              />
+              <label className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground block mt-2">
+                Award amount (ORA, gross)
+              </label>
+              <Input
+                type="number"
+                placeholder={`min ${BOUNTY_V2_LIMITS.MIN_AWARD_AMOUNT}`}
+                value={awardAmount}
+                onChange={e => setAwardAmount(e.target.value)}
+                className="text-sm"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Winner receives 95% net; 5% goes to the protocol fee split.
+              </p>
+              <div className="flex gap-2 pt-1">
+                <Button
+                  size="sm"
+                  onClick={handleAward}
+                  disabled={actionBusy !== null}
+                  className="bg-aura hover:bg-aura-dark text-white flex-1"
+                >
+                  <Award className="w-3.5 h-3.5 mr-1.5" />
+                  {actionBusy === 'award' ? 'Awarding…' : 'Award winner'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleReject}
+                  disabled={actionBusy !== null}
+                  className="flex-1"
+                >
+                  <XCircle className="w-3.5 h-3.5 mr-1.5" />
+                  {actionBusy === 'reject' ? 'Rejecting…' : 'Reject'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Cancel / Refund row */}
+          <div className="flex gap-2 pt-2 border-t border-aura/20">
+            {bounty.status === 'active' && !deadlineInfo.expired && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleCancel}
+                disabled={actionBusy !== null}
+                className="flex-1 text-red-600 border-red-500/40 hover:bg-red-500/10"
+              >
+                <Ban className="w-3.5 h-3.5 mr-1.5" />
+                {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel bounty'}
+              </Button>
+            )}
+            {deadlineInfo.expired && bounty.status !== 'completed' && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRefund}
+                disabled={actionBusy !== null}
+                className="flex-1"
+              >
+                <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                {actionBusy === 'refund' ? 'Refunding…' : 'Refund expired'}
+              </Button>
+            )}
+          </div>
+          <p className="text-[10px] text-muted-foreground/70 font-mono break-all pt-1">
+            bounty: {bountyPda.toBase58()}
+          </p>
+        </div>
+      )}
+
+      {/* Creator-only note (mock mode) */}
+      {isCreator && !useRealChain && (
         <div className="bg-aura/5 border border-aura/30 rounded-2xl p-6 space-y-2">
           <h2 className="text-sm font-semibold inline-flex items-center gap-2">
             <Briefcase className="w-4 h-4 text-aura" />

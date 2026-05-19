@@ -10,6 +10,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useI18n } from '@/context/I18nContext';
 import { putMedia } from '@/lib/mediaStore';
 import { useToast } from '@/context/ToastContext';
+import {
+  useCoreContract,
+  placeholderArweaveTxId,
+  modeToContentType,
+  accessControlToCore,
+} from '@/hooks/useCoreContract';
+import {
+  useMarketRoyaltyContract,
+  royaltyPercentToBps,
+  NFT_ROYALTY_BPS,
+} from '@/hooks/useMarketRoyaltyContract';
+import { recordOwnPost } from '@/lib/onChainPostStore';
 
 type CreateMode = 'photo' | 'video' | 'text' | 'audio' | 'live';
 type AccessControl = 'public' | 'content-key' | 'followers' | 'coin-holders';
@@ -200,6 +212,10 @@ export default function CreatePage() {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { t } = useI18n();
   const mockChain = useMockChain();
+  // On-chain bridges. Both gate off VITE_CORE_REAL_CHAIN=true.
+  // When false, publish + royalty stay on the existing mock chain flow.
+  const coreOnChain = useCoreContract();
+  const royaltyOnChain = useMarketRoyaltyContract();
   // Allow Studio Hub to deep-link straight into a content mode via
   // ?mode=photo|video|text|audio|live and auto-toggle the premium flag
   // via ?premium=1 — saves the user from picking the type again.
@@ -334,7 +350,10 @@ export default function CreatePage() {
   // Copyright/CC License
   const [licenseType, setLicenseType] = useState('All Rights Reserved');
   
-  // Royalty Settings
+  // Royalty Settings — bounded to on-chain range (5..45 % per
+  // whitepaper §12). UI slider min/max match NFT_ROYALTY_BPS.{MIN,MAX}.
+  const ROYALTY_MIN_PCT = NFT_ROYALTY_BPS.MIN / 100; // 5
+  const ROYALTY_MAX_PCT = NFT_ROYALTY_BPS.MAX / 100; // 45
   const [royaltyPercent, setRoyaltyPercent] = useState(10);
   
   // Arweave Storage - Default to true
@@ -699,6 +718,18 @@ export default function CreatePage() {
 
   const handlePublish = async () => {
     setPublishError(null);
+    // Client-side royalty validation. If the user toggled mintAsNFT,
+    // royaltyPercent must be in [ROYALTY_MIN_PCT, ROYALTY_MAX_PCT]; the
+    // on-chain set_royalty ix would reject anything else. Surface a
+    // friendly error instead of paying gas to learn this.
+    if (mintAsNFT) {
+      if (royaltyPercent < ROYALTY_MIN_PCT || royaltyPercent > ROYALTY_MAX_PCT) {
+        setPublishError(
+          `Royalty must be between ${ROYALTY_MIN_PCT}% and ${ROYALTY_MAX_PCT}%.`,
+        );
+        return;
+      }
+    }
     // 2026-05-11 R9: derive the *effective* primary mode at publish time.
     // The user may have started in `photo` (default), uploaded a photo as
     // cover, then added an audio file — in that flow `mode` may still be
@@ -713,7 +744,91 @@ export default function CreatePage() {
     if (audioUrl) effectiveMode = 'audio';
     else if (videoUrl) effectiveMode = 'video';
     try {
+      // On-chain publish branch. Gated by VITE_CORE_REAL_CHAIN.
+      // 2026-05-19: Arweave upload is not yet wired into the composer,
+      // so we pass a deterministic 43-char placeholder tx id. The on-chain
+      // program only validates length, not content — once the uploader
+      // lands we swap this for the real ar:// tx id.
+      let corePostPda: string | null = null;
+      let coreSignature: string | null = null;
+      let coreAuthorBase58: string | null = null;
+      if (coreOnChain.enabled && coreOnChain.module) {
+        const author = (coreOnChain.module as any).wallet?.publicKey;
+        if (!author) throw new Error('Connect a Solana wallet first.');
+        coreAuthorBase58 = author.toBase58();
+
+        // 2026-05-19 — Core publishContent requires a registered
+        // UserProfile PDA. Auto-register on the user's behalf the first
+        // time they publish so the demo flow doesn't fork into a
+        // "register first" detour. Skip if the profile already exists.
+        try {
+          const existingProfile = await coreOnChain.module.fetchUserProfile(author);
+          if (!existingProfile) {
+            const shortAddr = author.toBase58().slice(0, 8);
+            const reg = await coreOnChain.module.registerUser({
+              username: `user_${shortAddr}`,
+              profileUri: '',
+            });
+            if (!reg.success) {
+              throw new Error(reg.error || 'user registration failed');
+            }
+          }
+        } catch (regErr: any) {
+          // If the user-profile fetch itself errored (e.g. RPC blip) we
+          // still attempt registration — registerUser is idempotent at
+          // the PDA level (System Program will refuse to re-init).
+          console.warn('[CreatePage] user-profile check failed:', regErr?.message);
+        }
+
+        const arweaveTxId = placeholderArweaveTxId(title || 'untitled');
+        const corePublish = await coreOnChain.module.publishContent({
+          arweaveTxId,
+          contentType: modeToContentType(effectiveMode),
+          accessControl: accessControlToCore(accessControls),
+          // For content-key gated posts, encode the ORA key price in raw
+          // u64 lamports (9 decimals). 0 for free posts.
+          price: accessControls.has('content-key')
+            ? BigInt(Math.max(0, Math.floor((parseFloat(keyPrice) || 0) * 1_000_000_000)))
+            : 0n,
+        });
+        if (!corePublish.success) {
+          throw new Error(corePublish.error || 'on-chain publish failed');
+        }
+        corePostPda = corePublish.post ? corePublish.post.toBase58() : null;
+        coreSignature = corePublish.signature || null;
+        // Optional: set NFT royalty if the user enabled mintAsNFT. For
+        // now we re-use the freshly-derived post PDA as the "NFT mint"
+        // input slot — once a real mint flow exists (mint_nft ix) we
+        // pass that mint address here instead.
+        if (mintAsNFT && royaltyOnChain.enabled && royaltyOnChain.module) {
+          try {
+            const royaltyBps = royaltyPercentToBps(royaltyPercent);
+            const nftMint = corePublish.post;
+            if (nftMint) {
+              const r = await royaltyOnChain.module.setRoyalty({
+                nftMint,
+                royaltyBps,
+              });
+              if (!r.success) {
+                // Don't fail the whole publish on royalty error — surface
+                // as a soft warning. The post is live regardless.
+                console.warn('[CreatePage] setRoyalty failed:', r.error);
+              }
+            }
+          } catch (royaltyErr: any) {
+            console.warn('[CreatePage] royalty step skipped:', royaltyErr?.message);
+          }
+        }
+        // Fall through into the mock-chain bookkeeping so the local
+        // feed / Studio dashboard still see this post. We swap the tx
+        // hash for the real on-chain signature.
+        (mockChain as any).lastOnChainSignature = corePublish.signature;
+      }
       const result = await mockChain.publishContent({ title, content, tags, images, mode: effectiveMode, accessControl: Array.from(accessControls) });
+      // If we have a real on-chain signature, prefer it for the receipt.
+      if (coreOnChain.enabled && (mockChain as any).lastOnChainSignature) {
+        result.txHash = (mockChain as any).lastOnChainSignature;
+      }
       // Save to localStorage feed
       const feedItems = JSON.parse(localStorage.getItem('aura_user_posts') || '[]');
       // Set license if enabled
@@ -722,6 +837,26 @@ export default function CreatePage() {
         mockChain.setLicense(contentId, embedPrice, remixPrice);
       }
       const newPostId = crypto.randomUUID();
+
+      // 2026-05-19 — persist the on-chain post PDA in the per-user
+      // registry so HomePage / Profile / Explore can scan localStorage
+      // and surface this post in feeds (cross-user, per-device only —
+      // see lib/onChainPostStore.ts TODO for the future indexer).
+      if (corePostPda && coreAuthorBase58) {
+        try {
+          recordOwnPost(coreAuthorBase58, {
+            postPda: corePostPda,
+            author: coreAuthorBase58,
+            postId: newPostId,
+            createdAt: Date.now(),
+            title: title || 'Untitled',
+            mode: effectiveMode,
+            signature: coreSignature || undefined,
+          });
+        } catch (e) {
+          console.warn('[CreatePage] recordOwnPost failed:', e);
+        }
+      }
       // 2026-05-11 R14: pick the cover image with explicit priority:
       //   1) `coverImage` state (user-uploaded cover, or auto-extracted
       //      video first frame),
@@ -765,6 +900,10 @@ export default function CreatePage() {
           : undefined,
         accessControl: Array.from(accessControls),
         txHash: result.txHash,
+        // 2026-05-19 — on-chain post PDA + signature for downstream
+        // pages (PostDetail like/comment, Profile explorer link).
+        onChainPostPda: corePostPda || undefined,
+        onChainSignature: coreSignature || undefined,
         createdAt: new Date().toISOString(),
       });
       // 2026-05-11 R10: defend the localStorage write. If we're over the
@@ -816,6 +955,14 @@ export default function CreatePage() {
       // 2026-05-11 R12: keep the publishSuccess modal (showing reward +
       // tx link). When the user closes it (or clicks the Done button), the
       // close handler resets the composer and navigates to /studio?tab=content.
+      // On-chain success toast (explorer-linkable).
+      if (coreSignature) {
+        showToast(
+          'success',
+          '⛓️ Published on-chain',
+          `tx: ${coreSignature.slice(0, 8)}… · post: ${corePostPda?.slice(0, 6) || ''}…`,
+        );
+      }
       setPublishSuccess({
         show: true,
         amount: result.reward,
@@ -2864,17 +3011,17 @@ export default function CreatePage() {
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center gap-3">
-                    <span className="text-xs text-muted-foreground w-6">5%</span>
+                    <span className="text-xs text-muted-foreground w-6">{ROYALTY_MIN_PCT}%</span>
                     <input
                       type="range"
-                      min="5"
-                      max="45"
+                      min={ROYALTY_MIN_PCT}
+                      max={ROYALTY_MAX_PCT}
                       value={royaltyPercent}
                       onChange={(e) => setRoyaltyPercent(Number(e.target.value))}
                       className="flex-1 h-2 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-emerald-500 [&::-webkit-slider-thumb]:shadow-md"
-                      style={{background: `linear-gradient(to right, #10b981 0%, #10b981 ${((royaltyPercent - 5) / 40) * 100}%, #e5e7eb ${((royaltyPercent - 5) / 40) * 100}%, #e5e7eb 100%)`}}
+                      style={{background: `linear-gradient(to right, #10b981 0%, #10b981 ${((royaltyPercent - ROYALTY_MIN_PCT) / (ROYALTY_MAX_PCT - ROYALTY_MIN_PCT)) * 100}%, #e5e7eb ${((royaltyPercent - ROYALTY_MIN_PCT) / (ROYALTY_MAX_PCT - ROYALTY_MIN_PCT)) * 100}%, #e5e7eb 100%)`}}
                     />
-                    <span className="text-xs text-muted-foreground w-8">45%</span>
+                    <span className="text-xs text-muted-foreground w-8">{ROYALTY_MAX_PCT}%</span>
                     <div className="bg-emerald-500 text-white font-bold text-sm px-3 py-1 rounded-lg min-w-[3rem] text-center">
                       {royaltyPercent}%
                     </div>

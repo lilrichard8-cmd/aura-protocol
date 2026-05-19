@@ -28,6 +28,8 @@ import {
 import { useI18n } from '@/context/I18nContext';
 import { useMockChain, type InAppNotification, type CoinTradeNotification } from '@/context/MockChainContext';
 import { useDmUnread } from '@/hooks/useDmUnread';
+import { useChainTxHistory } from '@/hooks/useChainTxHistory';
+import { useOraContract } from '@/hooks/useOraContract';
 import UserAvatar from '@/components/UserAvatar';
 import MessagesPage from './MessagesPage';
 
@@ -108,6 +110,13 @@ export default function NotificationsPage() {
   const myWallet = mockChain.connected
     ? (mockChain.publicKey || mockChain.walletAddress || '')
     : null;
+  // 2026-05-19 Tier 2 — real-chain awareness banner. The on-chain side has
+  // no native "notifications" account, so we surface a banner explaining the
+  // limitation and let the user know recent on-chain transfers are visible
+  // in the Wallet > History tab.
+  const onChain = useOraContract();
+  const chainHistory = useChainTxHistory();
+  const showChainBanner = onChain.enabled;
   const dmUnread = useDmUnread(myWallet);
 
   // ─── Derived feeds ────────────────────────────────────────────────
@@ -302,6 +311,15 @@ export default function NotificationsPage() {
     }
     return (
       <div className="flex-1 flex flex-col min-h-0">
+        {showChainBanner && (
+          <div className="px-6 py-2 text-xs bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200/60 dark:border-amber-900/40 text-amber-900 dark:text-amber-200 flex items-start gap-2">
+            <Sparkles className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <div className="flex-1">
+              <span className="font-semibold">On-chain notifications coming soon.</span>
+              {' '}The protocol doesn't store "notifications" on-chain. Recent on-chain ORA transfers ({chainHistory.txs.length} found) appear under Wallet → History. The lists below show local activity captured by the app.
+            </div>
+          </div>
+        )}
         <div className="sticky top-0 z-10 bg-background/80 backdrop-blur-xl border-b border-border/40">
           <div className="px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-2">

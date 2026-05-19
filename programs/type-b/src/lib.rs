@@ -13,14 +13,16 @@ const PLATFORM_BPS: u64 = 500;
 ///
 /// ⚠️ DO NOT DEPLOY — placeholder = system_program::ID. Replace with the
 /// real ORA mint pubkey before mainnet.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// [audit fix TB-H1] Canonical platform-fee treasury (ORA-denominated).
 /// Forces the 5% platform fee to the protocol's actual treasury account.
 ///
 /// ⚠️ DO NOT DEPLOY — placeholder = system_program::ID. Replace with the
 /// real ORA treasury pubkey before mainnet.
-pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PLATFORM_TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix TB-C1 / per-task PROGRAM_ADMIN convention]
 /// Reserved for future admin-gated operations (rotating treasury, etc.).
@@ -28,7 +30,8 @@ pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_progra
 ///
 /// ⚠️ DO NOT DEPLOY — placeholder. Replace with real multisig pubkey
 /// pre-mainnet if/when admin-gated instructions are added.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix round2 R2-TB-M1] Runtime guard that aborts revenue-bearing
 /// instructions when `ORA_MINT` or `PLATFORM_TREASURY` are still set to the

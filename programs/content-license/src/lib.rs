@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE");
+declare_id!("8AmchauzdkEt2ZafZbac9NT8BGwLaL2sVwwQxKbSgis");
 
 // ============================================================================
 // [whitepaper-sync v1.1] Remix Royalty constants per Whitepaper v1.1 §7.4 and

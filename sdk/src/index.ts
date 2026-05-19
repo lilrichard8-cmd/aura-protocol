@@ -26,6 +26,12 @@ export {
   MONTHLY_UNLOCK_RAW,
   UNLOCK_MONTHS,
   MONTH_SECONDS,
+  CREATOR_COIN_DISC,
+  ORDER_DISC,
+  BENEFITS_LIST_DISC,
+  REDEMPTION_DISC,
+  REDEMPTION_COUNTER_DISC,
+  BURN_TRACKER_DISC,
 } from './modules/creatorCoin';
 export type {
   CreatorCoinPdas,
@@ -216,6 +222,13 @@ export {
   BOUNTY_V2_LIMITS,
   BOUNTY_V2_FEE_BPS,
   computeWinnerNet,
+  // NFT royalty (whitepaper §12)
+  NFT_ROYALTY_SEEDS,
+  NFT_ROYALTY_BPS,
+  NFT_PROTOCOL_FEE_BPS,
+  NFT_MAX_TOTAL_DEDUCTION_BPS,
+  computeNftSaleSplit,
+  deriveNftRoyaltyConfig,
 } from './modules/market';
 export type {
   MarketModuleConfig,
@@ -225,6 +238,11 @@ export type {
   BountyOnChain,
   SubmissionOnChain,
   BountyV2Pdas,
+  // NFT royalty types
+  NftSaleSplit,
+  NftRoyaltyConfigOnChain,
+  SetRoyaltyParams,
+  EnforceRoyaltyParams,
 } from './modules/market';
 
 export {

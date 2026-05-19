@@ -15,8 +15,9 @@
  */
 
 import { useMemo } from 'react';
-import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { useConnection } from '@solana/wallet-adapter-react';
 import { PublicKey } from '@solana/web3.js';
+import { useUnifiedWalletAsAdapter, type UnifiedWalletAdapter } from './useUnifiedWallet';
 import {
   MarketModule,
   type MarketModuleConfig,
@@ -28,7 +29,7 @@ import {
 } from '@aura-protocol/sdk';
 
 // Real on-chain program id (matches programs/market/Cargo.toml).
-const MARKET_PROGRAM_ID = new PublicKey('5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV');
+export const MARKET_PROGRAM_ID = new PublicKey('9YgDaCgqqHhztHEr8TDBmX3ffrdHw9nMXt2tZXjBA2sc');
 
 /** Reads VITE_* env vars at build time and falls back to placeholders. */
 function readMarketConfig(): MarketModuleConfig {
@@ -57,22 +58,23 @@ export interface BountyContract {
   oraMint: PublicKey;
 }
 
-/** Returns a stable MarketModule instance keyed to the wallet adapter. */
+/** Returns a stable MarketModule instance keyed to the active (unified) wallet. */
 export function useBountyContract(): BountyContract {
   const { connection } = useConnection();
-  const wallet = useWallet();
+  // 2026-05-19 — switched from useWallet() (wallet-adapter only) to the unified
+  // wallet so Privy embedded users can sign bounty transactions too.
+  // The returned object is structurally compatible with the SDK's WalletAdapter
+  // (publicKey + connected + sendTransaction).
+  const wallet = useUnifiedWalletAsAdapter();
 
   const enabled = (import.meta as any).env?.VITE_BOUNTY_REAL_CHAIN === 'true';
   const cfg = useMemo(() => readMarketConfig(), []);
 
   const module = useMemo(() => {
     if (!enabled) return null;
-    // The wallet-adapter-react `WalletContextState` is structurally compatible
-    // with the SDK's `WalletAdapter` requirements (publicKey + connected +
-    // sendTransaction). We cast pragmatically — at runtime the shape matches.
     return new MarketModule(
       connection,
-      wallet as any,
+      wallet as UnifiedWalletAdapter,
       MARKET_PROGRAM_ID,
       cfg
     );

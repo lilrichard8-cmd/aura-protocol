@@ -1,27 +1,32 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8");
+declare_id!("DimxL8QLZ5xPrq4igyuZbU52cfL81eVzEoani45Z63h7");
 
 // [audit fix C-H1 / C-1 / C-2] Hardcoded admin / deposit authority.
 // ⚠️ DO NOT DEPLOY — placeholder; replace with the real protocol multisig
 // before mainnet deploy.
-pub const POOL_INITIALIZER: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const POOL_DEPOSITOR: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const POOL_INITIALIZER: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const POOL_DEPOSITOR: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [whitepaper-sync v1.1] Hardcoded ORA mint required for the per-curation
 /// 1 ORA cost gate and the 100-ORA sybil-holding floor introduced by
 /// Handbook §10. Placeholder = System Program ID until mainnet wiring.
 /// PRE-MAINNET TODO: replace with the canonical aura_ora SPL mint.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// [whitepaper-sync v1.1] Hardcoded ORA sink token account that receives the
 /// 1-ORA-per-curation cost (Handbook §10 anti-sybil). At mainnet this should
 /// be the protocol curator-reward pool ATA (the same account that funds the
 /// 10,000 ORA / day Curator Reward Pool) so per-curation costs cycle directly
 /// back into curator rewards. Placeholder = System Program ID until wired.
-pub const CURATION_FEE_SINK: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const CURATION_FEE_SINK: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 // [audit fix round2 C2.C-2] Hardcoded core-program ID used to validate that
 // `content` AccountInfos passed in are actual `Post` accounts owned by the

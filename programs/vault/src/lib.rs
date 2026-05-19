@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("9sefu7Jr4kAdASSro3AHpTp7XVcShveDntZWvPeJczNL");
+declare_id!("7XdAeorsSoYDhHrJMQHuHKrPVerQvfz8zt18cEW4N3Rz");
 
 // =============================================================================
 // [audit fix C-V1 / H-V1 / C-V2] Hardcoded protocol authority + treasury.
@@ -10,20 +10,24 @@ declare_id!("9sefu7Jr4kAdASSro3AHpTp7XVcShveDntZWvPeJczNL");
 // =============================================================================
 
 /// Program admin allowed to initialise vault config. Prevents front-run init.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Hardcoded arbitration multisig — the only signer authorised to freeze /
 /// unfreeze / seize. Set at deployment, can be rotated by `rotate_arbitration_authority`.
-pub const INITIAL_ARBITRATION_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const INITIAL_ARBITRATION_AUTHORITY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Hardcoded protocol treasury that receives seized funds.
 /// [audit fix C-V2] `seize_funds` can ONLY transfer to this address.
-pub const TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Canonical ORA SPL mint. All vaults are restricted to this mint so creator
 /// payouts cannot be denominated in attacker-controlled tokens.
 /// [audit fix round2 R2-H-V1] `InitializeVault.ora_mint` is bound to this.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// Vesting period (7 days). Gates `claim_vested` AND `spend_pending`.
 /// [audit fix round2 R2-C-V1] `spend_pending` shares the same vesting gate as

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Layers, Plus, Minus, Wallet, Coins, Compass, Activity,
+  ArrowLeft, Layers, Plus, Minus, Wallet, Coins, Compass, Activity, Link2,
 } from 'lucide-react';
+import { PublicKey } from '@solana/web3.js';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -10,6 +11,7 @@ import { useMockChain } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
 import { useOraGuard } from '@/hooks/useOraGuard';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useFractionalizeContract } from '@/hooks/useFractionalizeContract';
 
 /**
  * Fractional Ownership detail page.
@@ -32,6 +34,11 @@ export default function FractionDetailPage() {
   const mockChain = useMockChain();
   const { showToast } = useToast();
   const oraGuard = useOraGuard();
+  // 2026-05-19 — real-chain bridge. Active when
+  // VITE_FRACTIONALIZE_REAL_CHAIN=true AND the mock NFT record carries a
+  // real on-chain `nftMint` (FractionalizedNft.mintAddress). Otherwise
+  // mock-only.
+  const fractionalizeChain = useFractionalizeContract();
   const [count, setCount] = useState('1');
   const [busy, setBusy] = useState(false);
 
@@ -71,6 +78,35 @@ export default function FractionDetailPage() {
   const marketCap = nft.pricePerFragment * nft.totalFragments;
 
   // ── Actions ──────────────────────────────────────────────────────────────
+  // Resolve the on-chain NFT mint, if the FractionalizedNft record carries
+  // one (real-chain enabled fragmental NFTs). Mock-only entries return null.
+  const onChainMint: PublicKey | null = (() => {
+    const raw = (nft as any).mintAddress as string | undefined;
+    if (!raw) return null;
+    try { return new PublicKey(raw); } catch { return null; }
+  })();
+  const chainModeActive = fractionalizeChain.enabled && !!onChainMint && fractionalizeChain.walletReady;
+
+  // Best-effort chain dispatch — logs result and surfaces a toast on
+  // failure but never blocks the mock-chain flow.
+  const dispatchChain = async (
+    label: string,
+    fn: () => Promise<{ success: boolean; error?: string; signature?: string }>,
+  ) => {
+    if (!chainModeActive) return;
+    try {
+      const r = await fn();
+      if (!r.success) {
+        console.warn(`[FractionDetailPage] on-chain ${label} failed:`, r.error);
+        showToast('info', `On-chain ${label} skipped: ${r.error?.slice(0, 80) ?? 'unknown'}`);
+      } else {
+        console.log(`[FractionDetailPage] on-chain ${label} tx:`, r.signature);
+      }
+    } catch (e: any) {
+      console.warn(`[FractionDetailPage] on-chain ${label} threw`, e);
+    }
+  };
+
   const handleBuy = async () => {
     const n = Math.min(cnt, available);
     if (n <= 0) {
@@ -83,6 +119,12 @@ export default function FractionDetailPage() {
     try {
       await mockChain.buyFragment(nft.id, n);
       showToast('success', `Bought ${n} fragment${n === 1 ? '' : 's'} for ${cost.toFixed(2)} ORA`);
+      // Real-chain dispatch — fire-and-forget.
+      if (chainModeActive && onChainMint) {
+        dispatchChain('buyFragment', () =>
+          fractionalizeChain.buyFragment({ nftMint: onChainMint, amount: BigInt(n) }),
+        );
+      }
     } catch (e: any) {
       if (/insufficient/i.test(e?.message ?? '')) {
         oraGuard.ensure(cost, 'Fragment purchase');
@@ -104,6 +146,11 @@ export default function FractionDetailPage() {
     try {
       await mockChain.sellFragment(nft.id, n);
       showToast('success', `Sold ${n} fragment${n === 1 ? '' : 's'}`);
+      if (chainModeActive && onChainMint) {
+        dispatchChain('sellFragment', () =>
+          fractionalizeChain.sellFragment({ nftMint: onChainMint, amount: BigInt(n) }),
+        );
+      }
     } catch (e: any) {
       showToast('error', e?.message || 'Sale failed');
     } finally {
@@ -116,6 +163,11 @@ export default function FractionDetailPage() {
     try {
       const claimed = await mockChain.claimFragmentRevenue(nft.id);
       showToast('success', `Claimed ${claimed.toFixed(2)} ORA`, 'Revenue deposited to your wallet');
+      if (chainModeActive && onChainMint) {
+        dispatchChain('claimRevenue', () =>
+          fractionalizeChain.claimRevenue({ nftMint: onChainMint }),
+        );
+      }
     } catch (e: any) {
       showToast('error', e?.message || 'Claim failed');
     } finally {
@@ -138,9 +190,19 @@ export default function FractionDetailPage() {
               <p className="text-sm text-muted-foreground truncate">Fractional Ownership · by {nft.creator}</p>
             </div>
           </div>
-          <Badge className="bg-gradient-to-r from-indigo-500 to-blue-500 text-white shrink-0 whitespace-nowrap">
-            <Layers className="w-3 h-3 mr-1" /> Fractional
-          </Badge>
+          <div className="flex items-center gap-2 shrink-0">
+            {chainModeActive && (
+              <Badge
+                className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 whitespace-nowrap"
+                title="This fractional NFT is on-chain. Trades dispatch real Solana transactions."
+              >
+                <Link2 className="w-3 h-3 mr-1" /> On-chain
+              </Badge>
+            )}
+            <Badge className="bg-gradient-to-r from-indigo-500 to-blue-500 text-white whitespace-nowrap">
+              <Layers className="w-3 h-3 mr-1" /> Fractional
+            </Badge>
+          </div>
         </div>
       </div>
 

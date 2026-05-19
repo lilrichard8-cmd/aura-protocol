@@ -10,7 +10,7 @@ pub use benefits::*;
 pub use gift::*;
 pub use redemption::*;
 
-declare_id!("B38n2DX7BR4tEait7Pn3SHUwB29WQt4U8jttCQgJZ57w");
+declare_id!("DW4BZcwY5c3nQHMGKysmTdXKpFous778RKcbSvw2xNMZ");
 
 // ─── Hardcoded protocol authorities (audit batch 2) ─────────────────────────
 // ⚠️ DO NOT DEPLOY: these are System Program ID placeholders so the program
@@ -23,16 +23,19 @@ declare_id!("B38n2DX7BR4tEait7Pn3SHUwB29WQt4U8jttCQgJZ57w");
 
 /// [audit fix B.C-5] Hardcoded admin key required to call `init_burn_tracker`.
 /// Prevents front-run init of the global singleton burn tracker PDA.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix B.C-10] Hardcoded activity oracle required to call `unlock_monthly`.
 /// Replaces the per-coin `creator_coin.activity_oracle` field (which the creator
 /// could set to themselves, defeating the C-7 fix from batch 1).
-pub const ACTIVITY_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const ACTIVITY_ORACLE: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix B.C-8] Hardcoded keeper required to call `auto_confirm`.
 /// Prevents arbitrary signers from racing the buyer's dispute window.
-pub const AUTO_CONFIRM_KEEPER: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const AUTO_CONFIRM_KEEPER: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Fixed supply per creator coin
 const TOTAL_SUPPLY_RAW: u64 = 10_000 * 1_000_000_000; // 9 decimals
@@ -130,6 +133,155 @@ pub mod aura_creator_coin {
         emit!(CoinMinted { mint: mint_key, creator: creator_key, slot });
 
         msg!("Creator Coin '{}' created: 2000 minted, 8000 locked, benefits list initialized", symbol);
+        Ok(())
+    }
+
+    // ─── [stack-fix 2026-05-19] Split create_creator_coin ──────────────────
+    //
+    // The legacy `create_creator_coin` Accounts struct has 4 inits + a heavy
+    // TokenAccount constraint chain that overflows the BPF 4KB stack frame
+    // (~5440 bytes). The flow is now split across THREE instructions, each
+    // with at most 2 inits, and the creator's ATA is created on-chain via
+    // `init_if_needed` in the final step so callers no longer have to
+    // pre-create it (which was impossible before the mint existed).
+    //
+    //   1. `init_creator_coin_mint(symbol, initial_price, activity_oracle)`
+    //        inits  : creator_coin_mint, creator_coin   (2 inits)
+    //        marks  : creator_coin.locked_supply = TOTAL, circulating = 0
+    //   2. `init_creator_coin_benefits()`
+    //        inits  : benefits_list   (1 init)
+    //        constraint: creator_coin.circulating_supply == 0 ("not finalized")
+    //   3. `finalize_creator_coin()`
+    //        inits  : creator_token_account ATA   (1 ATA init)
+    //        action : mint 2000 CC to creator ATA, set circulating supply
+    //        constraint: creator_coin.circulating_supply == 0 (one-shot)
+
+    /// Step 1/3: initialize creator_coin + creator_coin_mint.
+    pub fn init_creator_coin_mint(
+        ctx: Context<InitCreatorCoinMint>,
+        symbol: String,
+        initial_price: u64,
+        activity_oracle: Pubkey,
+    ) -> Result<()> {
+        require!(symbol.len() <= 10, ErrorCode::SymbolTooLong);
+
+        // [stack-fix 2026-05-19] creator_profile is owned by aura_core; we
+        // unpack it manually. The PDA seed ("user", creator) is verified by
+        // re-deriving; authority + follower_count are read from the data.
+        let profile_ai = &ctx.accounts.creator_profile;
+        let expected_profile = Pubkey::find_program_address(
+            &[b"user", ctx.accounts.creator.key().as_ref()],
+            &Pubkey::new_from_array([
+                // aura_core program id: 4VTNh4tcTuF5wDYhP8qbvf5hdUV4xUm7KJVJd9oSweEE
+                0x33, 0xDD, 0x25, 0x03, 0xA4, 0xFA, 0x94, 0xDC,
+                0xBE, 0x4A, 0x41, 0x9C, 0x4C, 0xC0, 0x4F, 0xEF,
+                0x3E, 0x53, 0xC7, 0x45, 0xC4, 0x43, 0xB6, 0xAB,
+                0xEE, 0xC7, 0xB3, 0x9A, 0xAB, 0xA4, 0x3F, 0xF3,
+            ]),
+        ).0;
+        require_keys_eq!(profile_ai.key(), expected_profile, ErrorCode::Unauthorized);
+
+        // UserProfile layout (in aura_core):
+        //   8 disc + 32 authority + 4+username + 4+uri + 4 reputation +
+        //   4 follower_count + 4 following_count + 4 post_count + 8 created_at
+        //   + 1 bump
+        let data = profile_ai.try_borrow_data()?;
+        require!(data.len() >= 8 + 32 + 4, ErrorCode::Unauthorized);
+        let authority = Pubkey::new_from_array(
+            data[8..40].try_into().map_err(|_| error!(ErrorCode::Unauthorized))?,
+        );
+        require_keys_eq!(authority, ctx.accounts.creator.key(), ErrorCode::Unauthorized);
+        let username_len = u32::from_le_bytes(data[40..44].try_into().map_err(|_| error!(ErrorCode::Unauthorized))?) as usize;
+        let mut off = 44 + username_len;
+        require!(data.len() >= off + 4, ErrorCode::Unauthorized);
+        let uri_len = u32::from_le_bytes(data[off..off+4].try_into().map_err(|_| error!(ErrorCode::Unauthorized))?) as usize;
+        off += 4 + uri_len;
+        require!(data.len() >= off + 4 + 4, ErrorCode::Unauthorized);
+        // skip reputation_score (u32)
+        off += 4;
+        let follower_count = u32::from_le_bytes(data[off..off+4].try_into().map_err(|_| error!(ErrorCode::Unauthorized))?);
+        require!(follower_count >= MIN_FOLLOWERS, ErrorCode::InsufficientFollowers);
+        drop(data);
+
+        require!(activity_oracle != ctx.accounts.creator.key(), ErrorCode::Unauthorized);
+
+        let now = Clock::get()?.unix_timestamp;
+        let creator_key = ctx.accounts.creator.key();
+        let mint_key = ctx.accounts.creator_coin_mint.key();
+        let bump = ctx.bumps.creator_coin;
+
+        let coin = &mut ctx.accounts.creator_coin;
+        coin.creator = creator_key;
+        coin.mint = mint_key;
+        coin.symbol = symbol.clone();
+        coin.initial_price = initial_price;
+        coin.total_supply = TOTAL_SUPPLY_RAW;
+        coin.circulating_supply = 0; // becomes INITIAL_SUPPLY_RAW in step 3
+        coin.locked_supply = LOCKED_SUPPLY_RAW;
+        coin.months_unlocked = 0;
+        coin.last_unlock_time = now;
+        coin.created_at = now;
+        coin.total_trading_volume = 0;
+        coin.total_fees_earned = 0;
+        coin.activity_oracle = activity_oracle;
+        coin.bump = bump;
+        msg!("creator_coin + mint initialized: {}", symbol);
+        Ok(())
+    }
+
+    /// Step 2/3: initialize benefits_list PDA.
+    pub fn init_creator_coin_benefits(ctx: Context<InitCreatorCoinBenefits>) -> Result<()> {
+        require!(
+            ctx.accounts.creator_coin.circulating_supply == 0,
+            ErrorCode::Unauthorized // re-used as "already finalized" guard
+        );
+        let bl_bump = ctx.bumps.benefits_list;
+        let bl = &mut ctx.accounts.benefits_list;
+        bl.coin_mint = ctx.accounts.creator_coin_mint.key();
+        bl.creator = ctx.accounts.creator.key();
+        bl.benefits = Vec::new();
+        bl.next_id = 0;
+        bl.bump = bl_bump;
+
+        let slot = Clock::get()?.slot;
+        emit!(BenefitsListInitialized { coin_mint: bl.coin_mint, creator: bl.creator, slot });
+        Ok(())
+    }
+
+    /// Step 3/3: init creator's ATA and mint the genesis 2000 CC supply.
+    pub fn finalize_creator_coin(ctx: Context<FinalizeCreatorCoin>) -> Result<()> {
+        require!(
+            ctx.accounts.creator_coin.circulating_supply == 0,
+            ErrorCode::Unauthorized
+        );
+        let creator_key = ctx.accounts.creator_coin.creator;
+        let coin_bump = ctx.accounts.creator_coin.bump;
+
+        let seeds = &[b"creator_coin", creator_key.as_ref(), &[coin_bump]];
+        let signer = &[&seeds[..]];
+
+        token::mint_to(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                MintTo {
+                    mint: ctx.accounts.creator_coin_mint.to_account_info(),
+                    to: ctx.accounts.creator_token_account.to_account_info(),
+                    authority: ctx.accounts.creator_coin.to_account_info(),
+                },
+                signer,
+            ),
+            INITIAL_SUPPLY_RAW,
+        )?;
+
+        ctx.accounts.creator_coin.circulating_supply = INITIAL_SUPPLY_RAW;
+
+        let slot = Clock::get()?.slot;
+        emit!(CoinMinted {
+            mint: ctx.accounts.creator_coin_mint.key(),
+            creator: creator_key,
+            slot,
+        });
+        msg!("creator_coin finalized: 2000 minted to creator ATA");
         Ok(())
     }
 
@@ -853,36 +1005,142 @@ impl BurnTracker { pub const SIZE: usize = 8 + 16 + 8 + 1; }
 
 // === Instruction Contexts ===
 
+// [stack-fix 2026-05-19] Original `CreateCreatorCoin` Accounts struct: 5
+// `init`s + many constraints overflowed the BPF stack. We keep the original
+// (broken) instruction for backward compat with off-chain code that may
+// still reference its discriminator, but new callers should use the split
+// `init_creator_coin_mint` + `finalize_creator_coin` pair below which each
+// have at most 2 `init`s and fit comfortably under the 4KB cap.
+//
+// All Account<> fields are still Box-ified to minimize the leftover frame
+// for any tooling that does attempt the legacy path.
 #[derive(Accounts)]
 #[instruction(symbol: String)]
 pub struct CreateCreatorCoin<'info> {
     // [audit fix C-7] +32 for activity_oracle field
     #[account(init, payer = creator, space = 8 + 32 + 32 + 14 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 8 + 8 + 32 + 1,
         seeds = [b"creator_coin", creator.key().as_ref()], bump)]
-    pub creator_coin: Account<'info, CreatorCoin>,
+    pub creator_coin: Box<Account<'info, CreatorCoin>>,
     #[account(init, payer = creator, mint::decimals = 9, mint::authority = creator_coin,
         seeds = [b"creator_coin_mint", creator.key().as_ref()], bump)]
-    pub creator_coin_mint: Account<'info, Mint>,
+    pub creator_coin_mint: Box<Account<'info, Mint>>,
     // [audit fix H-9] init benefits_list atomically with the coin so it cannot be frontrun
     #[account(init, payer = creator, space = BenefitsList::MAX_SIZE,
         seeds = [b"benefits", creator_coin_mint.key().as_ref()], bump)]
-    pub benefits_list: Account<'info, BenefitsList>,
+    pub benefits_list: Box<Account<'info, BenefitsList>>,
     // [audit fix B.C-11] bind initial supply destination to creator + correct mint.
-    // Even though `creator` is a Signer, this prevents the creator from accidentally
-    // (or maliciously, in case of malware-replaced signer) routing the 2000-token
-    // genesis allocation to an unrelated account.
     #[account(
         mut,
         constraint = creator_token_account.owner == creator.key() @ ErrorCode::Unauthorized,
         constraint = creator_token_account.mint == creator_coin_mint.key() @ ErrorCode::Unauthorized,
     )]
-    pub creator_token_account: Account<'info, TokenAccount>,
+    pub creator_token_account: Box<Account<'info, TokenAccount>>,
     #[account(seeds = [b"user", creator.key().as_ref()], bump = creator_profile.bump,
         constraint = creator_profile.authority == creator.key() @ ErrorCode::Unauthorized)]
-    pub creator_profile: Account<'info, UserProfile>,
+    pub creator_profile: Box<Account<'info, UserProfile>>,
     #[account(mut)]
     pub creator: Signer<'info>,
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+// [stack-fix 2026-05-19] Split-create_creator_coin step 1/3:
+// init creator_coin + creator_coin_mint. 2 inits. Note: creator_profile is
+// owned by aura_core (NOT this program), so we pass it as AccountInfo and
+// validate authority + follower_count manually in the handler. This also
+// keeps the Accounts struct lean (no extra Account<UserProfile> cache).
+#[derive(Accounts)]
+#[instruction(symbol: String)]
+pub struct InitCreatorCoinMint<'info> {
+    #[account(
+        init,
+        payer = creator,
+        space = 8 + 32 + 32 + 14 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 8 + 8 + 32 + 1,
+        seeds = [b"creator_coin", creator.key().as_ref()],
+        bump
+    )]
+    pub creator_coin: Box<Account<'info, CreatorCoin>>,
+    #[account(
+        init,
+        payer = creator,
+        mint::decimals = 9,
+        mint::authority = creator_coin,
+        seeds = [b"creator_coin_mint", creator.key().as_ref()],
+        bump
+    )]
+    pub creator_coin_mint: Box<Account<'info, Mint>>,
+    /// CHECK: validated in handler (PDA seed + authority + follower_count
+    /// unpack). Owned by aura_core, so Anchor's `Account<UserProfile>`
+    /// would reject it.
+    pub creator_profile: AccountInfo<'info>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+// [stack-fix 2026-05-19] Split-create_creator_coin step 2/3:
+// init benefits_list. 1 init.
+#[derive(Accounts)]
+pub struct InitCreatorCoinBenefits<'info> {
+    #[account(
+        mut,
+        seeds = [b"creator_coin", creator.key().as_ref()],
+        bump = creator_coin.bump,
+        constraint = creator_coin.creator == creator.key() @ ErrorCode::Unauthorized
+    )]
+    pub creator_coin: Box<Account<'info, CreatorCoin>>,
+    #[account(
+        seeds = [b"creator_coin_mint", creator.key().as_ref()],
+        bump,
+        constraint = creator_coin_mint.key() == creator_coin.mint @ ErrorCode::Unauthorized
+    )]
+    pub creator_coin_mint: Box<Account<'info, Mint>>,
+    #[account(
+        init,
+        payer = creator,
+        space = BenefitsList::MAX_SIZE,
+        seeds = [b"benefits", creator_coin_mint.key().as_ref()],
+        bump
+    )]
+    pub benefits_list: Box<Account<'info, BenefitsList>>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+// [stack-fix 2026-05-19] Split-create_creator_coin step 3/3:
+// init creator's ATA via init_if_needed and mint the genesis 2000 CC.
+// One ATA init only.
+#[derive(Accounts)]
+pub struct FinalizeCreatorCoin<'info> {
+    #[account(
+        mut,
+        seeds = [b"creator_coin", creator.key().as_ref()],
+        bump = creator_coin.bump,
+        constraint = creator_coin.creator == creator.key() @ ErrorCode::Unauthorized
+    )]
+    pub creator_coin: Box<Account<'info, CreatorCoin>>,
+    #[account(
+        mut,
+        seeds = [b"creator_coin_mint", creator.key().as_ref()],
+        bump,
+        constraint = creator_coin_mint.key() == creator_coin.mint @ ErrorCode::Unauthorized
+    )]
+    pub creator_coin_mint: Box<Account<'info, Mint>>,
+    #[account(
+        init_if_needed,
+        payer = creator,
+        associated_token::mint = creator_coin_mint,
+        associated_token::authority = creator,
+    )]
+    pub creator_token_account: Box<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
@@ -1246,7 +1504,8 @@ pub struct ExecuteRulingCtx<'info> {
 /// (5/7) and after Phase 3 with a governance program PDA via CPI.
 /// While this remains a placeholder, `execute_ruling` is intentionally bricked
 /// (no one can sign as the System Program) — safer than a wrong default authority.
-pub const PROTOCOL_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROTOCOL_AUTHORITY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 // Gift context
 #[derive(Accounts)]
@@ -1312,9 +1571,12 @@ pub struct PrimaryBuyCtx<'info> {
 /// While these remain System Program IDs, `fill_order` and `primary_buy` will fail
 /// at Anchor account deserialization (System Program is not a TokenAccount). This
 /// is intentional — prevents fee leakage if accidentally deployed.
-pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: 9byFYXdRziBe6huCRCsExz65eJMJRxkLPNReTYPzCiHS
+pub const STAKING_REWARDS_POOL: Pubkey = Pubkey::new_from_array([127, 210, 216, 137, 107, 161, 33, 182, 172, 186, 167, 117, 190, 40, 215, 32, 84, 56, 69, 15, 197, 164, 130, 140, 59, 246, 11, 42, 77, 87, 94, 69]);
+// [local-deploy 2026-05-19] real address on localnet: G9faGRWp35cDnGZdE38zwTisErASpYGoYcCKDvY3CPEE
+pub const GAS_RESERVE_POOL: Pubkey = Pubkey::new_from_array([225, 23, 144, 204, 122, 29, 73, 91, 161, 241, 10, 117, 27, 233, 253, 109, 104, 15, 163, 59, 61, 24, 233, 119, 245, 67, 128, 29, 70, 173, 249, 143]);
+// [local-deploy 2026-05-19] real address on localnet: FcpiWgjWuA39CMZfahxhDSMUGUavB4kVHjuovGvAxr1f
+pub const OPS_TREASURY_POOL: Pubkey = Pubkey::new_from_array([217, 48, 229, 202, 178, 131, 49, 202, 84, 203, 0, 200, 144, 206, 29, 150, 143, 191, 101, 210, 58, 17, 161, 63, 138, 132, 39, 227, 12, 173, 122, 146]);
 
 // Burn Tracker context (#11)
 // [audit fix B.C-5] init must be called by PROGRAM_ADMIN; prevents anonymous

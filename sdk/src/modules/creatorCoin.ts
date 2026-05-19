@@ -629,15 +629,36 @@ export class CreatorCoinModule {
   // Redemption
   // ────────────────────────────────────────────────────────────────────
 
+  /**
+   * Initialize the per-coin Redemption counter.
+   *
+   * Account order matches `InitRedemptionCounterCtx` (creator-coin/src/lib.rs):
+   *   redemption_counter | creator_coin | coin_mint | creator(signer) |
+   *   payer(signer) | system_program
+   *
+   * The connected wallet MUST be the coin's creator (it signs both as
+   * creator and as payer). Anchor's `Signers` deduplicates so the wallet
+   * appears once.
+   *
+   * 2026-05-19 SDK fix — earlier revision was missing `creator_coin` +
+   * a separate `creator` signer entry and would always fail the
+   * `constraint = creator_coin.creator == creator.key()` check.
+   */
   async initRedemptionCounter(coinMint: PublicKey): Promise<TransactionResult> {
-    const payer = this.requireWallet();
+    const creator = this.requireWallet();
     const counterPda = this.pdas.redemptionCounter(coinMint);
+    const creatorCoinPda = this.pdas.creatorCoin(creator);
     const ix = new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: counterPda, isSigner: false, isWritable: true },
+        { pubkey: creatorCoinPda, isSigner: false, isWritable: false },
         { pubkey: coinMint, isSigner: false, isWritable: false },
-        { pubkey: payer, isSigner: true, isWritable: true },
+        // Anchor allows the same wallet to be both `creator` and `payer`.
+        // We still list it twice with isSigner=true to be explicit about
+        // the on-chain account constraints.
+        { pubkey: creator, isSigner: true, isWritable: false },
+        { pubkey: creator, isSigner: true, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
       data: ixDiscriminator('init_redemption_counter'),

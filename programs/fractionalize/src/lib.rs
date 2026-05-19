@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_pack::Pack;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount, Transfer};
 
-declare_id!("3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S");
+declare_id!("2QPBHcFbYc9UwoS5KBoGRcZ5Db4idyN1GxnbAuBLY38h");
 
 // ============================================================================
 // [whitepaper-sync v1.1] verified — NFT royalty range (5%-45%) per WP §12 is
@@ -26,8 +27,10 @@ declare_id!("3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S");
 // REVENUE_TREASURY is the protocol treasury token account hint reserved for
 // future settlement flows. Both default to the system program id and MUST be
 // rotated to the real AURA multisig + treasury pubkey before mainnet.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const REVENUE_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const REVENUE_TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 // Minimum sell-price multiplier (basis points) for the secondary market.
 // 10_000 bps = 1.0x, i.e. seller must request at least the buy price.
@@ -54,32 +57,48 @@ pub mod aura_fractionalize {
         require!(total_fragments <= 1_000_000, ErrorCode::TooManyFragments);
         require!(price_per_fragment > 0, ErrorCode::InvalidPrice);
 
-        // [audit fix H-F3 / C-F1] Defense-in-depth: ensure the source NFT
-        // account is actually owned by the signer and points at the asserted
-        // NFT mint. SPL Token also enforces this on transfer, but failing
-        // fast in the constraint surfaces a clearer error.
+        // [stack-fix 2026-05-19] nft_mint and owner_nft_account are now passed
+        // as AccountInfo so the Anchor-cached structs don't bloat the
+        // try_accounts stack frame. Validate them here with SPL unpack.
+        let nft_mint_ai = &ctx.accounts.nft_mint;
         require_keys_eq!(
-            ctx.accounts.owner_nft_account.owner,
-            ctx.accounts.owner.key(),
-            ErrorCode::Unauthorized
+            *nft_mint_ai.owner,
+            ctx.accounts.token_program.key(),
+            ErrorCode::InvalidMint
         );
-        require_keys_eq!(
-            ctx.accounts.owner_nft_account.mint,
-            ctx.accounts.nft_mint.key(),
-            ErrorCode::InvalidNftAccount
-        );
+        let nft_mint_data = anchor_spl::token::spl_token::state::Mint::unpack(
+            &nft_mint_ai.try_borrow_data()?,
+        ).map_err(|_| error!(ErrorCode::InvalidNftMint))?;
 
         // [audit fix C-F1] Require the NFT mint to actually be NFT-shaped:
         // 0 decimals and a tight supply. Without this, anyone can fractionalize
         // a freshly created fungible mint they control.
-        require!(
-            ctx.accounts.nft_mint.decimals == 0,
-            ErrorCode::InvalidNftMint
+        require!(nft_mint_data.decimals == 0, ErrorCode::InvalidNftMint);
+        require!(nft_mint_data.supply >= 1, ErrorCode::InvalidNftMint);
+
+        let owner_nft_ai = &ctx.accounts.owner_nft_account;
+        require_keys_eq!(
+            *owner_nft_ai.owner,
+            ctx.accounts.token_program.key(),
+            ErrorCode::InvalidNftAccount
         );
-        require!(
-            ctx.accounts.nft_mint.supply >= 1,
-            ErrorCode::InvalidNftMint
+        let owner_nft_data = anchor_spl::token::spl_token::state::Account::unpack(
+            &owner_nft_ai.try_borrow_data()?,
+        ).map_err(|_| error!(ErrorCode::InvalidNftAccount))?;
+
+        // [audit fix H-F3 / C-F1] Defense-in-depth: source NFT account must
+        // be owned by the signer and point at the asserted NFT mint.
+        require_keys_eq!(
+            owner_nft_data.owner,
+            ctx.accounts.owner.key(),
+            ErrorCode::Unauthorized
         );
+        require_keys_eq!(
+            owner_nft_data.mint,
+            ctx.accounts.nft_mint.key(),
+            ErrorCode::InvalidNftAccount
+        );
+        require!(owner_nft_data.amount >= 1, ErrorCode::InsufficientFragments);
 
         let fractional_nft = &mut ctx.accounts.fractional_nft;
         let clock = Clock::get()?;
@@ -118,6 +137,129 @@ pub mod aura_fractionalize {
             total_fragments,
             price_per_fragment
         );
+        Ok(())
+    }
+
+    // ─── [stack-fix 2026-05-19] Split fractionalize ──────────────────────
+    //
+    // The monolithic `fractionalize_nft` above has 4 `init` constraints in
+    // one Accounts context (fractional_nft, fragment_mint, nft_vault,
+    // revenue_vault) which makes Anchor's `try_accounts` codegen overflow
+    // the BPF 4KB stack cap (~5440 bytes). Box-ifying every Account<> still
+    // leaves it at ~5440 bytes because the `init` constraint codegen itself
+    // pulls per-account rent/space/lamports locals onto the stack.
+    //
+    // The new flow splits initialization across THREE instructions, each
+    // with at most 2 `init` accounts. SDK / smoke test invoke all three in
+    // sequence within a single transaction. PDA seeds and account semantics
+    // are unchanged; the on-chain state at the end is byte-for-byte
+    // identical to the monolithic version.
+    //
+    //   1. `init_fractional_state(total_fragments, price_per_fragment)`
+    //        inits  : fractional_nft
+    //        marks  : is_active = false
+    //   2. `init_fragment_mint()`
+    //        inits  : fragment_mint  (decimals 0, authority = fractional_nft)
+    //        constraint: fractional_nft.is_active == false
+    //   3. `init_vaults_and_lock()`
+    //        inits  : nft_vault, revenue_vault
+    //        action : transfer NFT → nft_vault, set is_active = true
+    //        constraint: fractional_nft.is_active == false
+
+    /// Step 1/3: initialize the FractionalNFT state PDA.
+    pub fn init_fractional_state(
+        ctx: Context<InitFractionalState>,
+        total_fragments: u64,
+        price_per_fragment: u64,
+    ) -> Result<()> {
+        require!(total_fragments > 0, ErrorCode::InvalidFragmentAmount);
+        require!(total_fragments <= 1_000_000, ErrorCode::TooManyFragments);
+        require!(price_per_fragment > 0, ErrorCode::InvalidPrice);
+
+        // Validate NFT mint shape via manual unpack (Mint passed as
+        // AccountInfo to keep this instruction's stack frame tight).
+        let nft_mint_ai = &ctx.accounts.nft_mint;
+        require_keys_eq!(*nft_mint_ai.owner, ctx.accounts.token_program.key(), ErrorCode::InvalidMint);
+        let nft_mint_data = anchor_spl::token::spl_token::state::Mint::unpack(
+            &nft_mint_ai.try_borrow_data()?,
+        ).map_err(|_| error!(ErrorCode::InvalidNftMint))?;
+        require!(nft_mint_data.decimals == 0, ErrorCode::InvalidNftMint);
+        require!(nft_mint_data.supply >= 1, ErrorCode::InvalidNftMint);
+
+        let fractional_nft = &mut ctx.accounts.fractional_nft;
+        let clock = Clock::get()?;
+        fractional_nft.original_nft = nft_mint_ai.key();
+        fractional_nft.original_owner = ctx.accounts.owner.key();
+        // fragment_mint set in step 2, nft_vault destination is the PDA
+        fractional_nft.fragment_mint = Pubkey::default();
+        fractional_nft.total_fragments = total_fragments;
+        fractional_nft.fragments_sold = 0;
+        fractional_nft.price_per_fragment = price_per_fragment;
+        fractional_nft.total_revenue = 0;
+        fractional_nft.revenue_distributed = 0;
+        fractional_nft.is_active = false; // becomes true in step 3
+        fractional_nft.created_at = clock.unix_timestamp;
+        fractional_nft.vote_threshold_bps = 5000;
+        fractional_nft.bump = ctx.bumps.fractional_nft;
+        fractional_nft.acc_revenue_per_fragment = 0;
+        fractional_nft.next_epoch_id = 0;
+        msg!("fractional_nft state initialized");
+        Ok(())
+    }
+
+    /// Step 2/3: initialize the fragment SPL mint (PDA-authority).
+    pub fn init_fragment_mint(ctx: Context<InitFragmentMint>) -> Result<()> {
+        require!(
+            !ctx.accounts.fractional_nft.is_active,
+            ErrorCode::NFTNotActive // re-used as "already finalized" guard
+        );
+        let fragment_mint_key = ctx.accounts.fragment_mint.key();
+        ctx.accounts.fractional_nft.fragment_mint = fragment_mint_key;
+        msg!("fragment_mint initialized: {}", fragment_mint_key);
+        Ok(())
+    }
+
+    /// Step 3/3: initialize NFT vault + revenue vault, lock the NFT, mark active.
+    pub fn init_vaults_and_lock(ctx: Context<InitVaultsAndLock>) -> Result<()> {
+        require!(
+            !ctx.accounts.fractional_nft.is_active,
+            ErrorCode::NFTNotActive
+        );
+        require_keys_eq!(
+            ctx.accounts.fractional_nft.original_owner,
+            ctx.accounts.owner.key(),
+            ErrorCode::Unauthorized
+        );
+
+        // Validate owner_nft_account via manual unpack.
+        let owner_nft_ai = &ctx.accounts.owner_nft_account;
+        require_keys_eq!(*owner_nft_ai.owner, ctx.accounts.token_program.key(), ErrorCode::InvalidNftAccount);
+        let owner_nft_data = anchor_spl::token::spl_token::state::Account::unpack(
+            &owner_nft_ai.try_borrow_data()?,
+        ).map_err(|_| error!(ErrorCode::InvalidNftAccount))?;
+        require_keys_eq!(owner_nft_data.owner, ctx.accounts.owner.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            owner_nft_data.mint,
+            ctx.accounts.fractional_nft.original_nft,
+            ErrorCode::InvalidNftAccount
+        );
+        require!(owner_nft_data.amount >= 1, ErrorCode::InsufficientFragments);
+
+        // Transfer the NFT into the protocol vault.
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.owner_nft_account.to_account_info(),
+                    to: ctx.accounts.nft_vault.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
+                },
+            ),
+            1,
+        )?;
+
+        ctx.accounts.fractional_nft.is_active = true;
+        msg!("vaults initialized, NFT locked, fractional_nft active");
         Ok(())
     }
 
@@ -1021,6 +1163,14 @@ pub struct LicenseVote {
 
 // ─── Context structures ──────────────────────────────────────────────────────
 
+// [stack-fix 2026-05-19] All `Account<>` fields Box-ified to move large
+// Anchor account caches off the BPF call stack (4KB cap). Additionally,
+// `nft_mint` and `owner_nft_account` are now plain `AccountInfo<>` and the
+// previously-declarative constraints (mint NFT-shape, owner, mint match,
+// amount >= 1) are validated in the handler via a single packed
+// Mint::unpack + TokenAccount::unpack call. Pulling these two out of the
+// macro-generated `try_accounts` stack frame is the difference between
+// 5440-byte frame (overflow) and ~3900-byte frame (fits).
 #[derive(Accounts)]
 pub struct FractionalizeNFT<'info> {
     #[account(
@@ -1032,10 +1182,13 @@ pub struct FractionalizeNFT<'info> {
         seeds = [b"fractional_nft", nft_mint.key().as_ref()],
         bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
-    /// Original NFT mint. NFT-shape (0 decimals) is enforced in the handler.
-    pub nft_mint: Account<'info, Mint>,
+    /// Original NFT mint. NFT-shape (0 decimals) is enforced in the handler
+    /// via manual SPL Mint::unpack. Kept as AccountInfo so its 280-byte cache
+    /// is not allocated on the try_accounts stack frame.
+    /// CHECK: owner == token_program & data validated in handler.
+    pub nft_mint: AccountInfo<'info>,
 
     /// Fragment SPL token mint (decimals = 0, authority = fractional_nft PDA).
     #[account(
@@ -1046,7 +1199,7 @@ pub struct FractionalizeNFT<'info> {
         seeds = [b"fragment_mint", nft_mint.key().as_ref()],
         bump
     )]
-    pub fragment_mint: Account<'info, Mint>,
+    pub fragment_mint: Box<Account<'info, Mint>>,
 
     /// NFT vault to hold the original NFT.
     #[account(
@@ -1057,7 +1210,7 @@ pub struct FractionalizeNFT<'info> {
         seeds = [b"nft_vault", nft_mint.key().as_ref()],
         bump
     )]
-    pub nft_vault: Account<'info, TokenAccount>,
+    pub nft_vault: Box<Account<'info, TokenAccount>>,
 
     /// Revenue vault to hold SOL from fragment sales.
     #[account(
@@ -1070,16 +1223,11 @@ pub struct FractionalizeNFT<'info> {
     /// CHECK: PDA that holds SOL; verified by seeds.
     pub revenue_vault: AccountInfo<'info>,
 
-    // [audit fix H-F3] Owner's NFT token account: must point at nft_mint and
-    // be owned by the signer. SPL Token enforces this on transfer; we also
-    // assert in the handler for clearer errors.
-    #[account(
-        mut,
-        constraint = owner_nft_account.mint == nft_mint.key() @ ErrorCode::InvalidNftAccount,
-        constraint = owner_nft_account.owner == owner.key() @ ErrorCode::Unauthorized,
-        constraint = owner_nft_account.amount >= 1 @ ErrorCode::InsufficientFragments,
-    )]
-    pub owner_nft_account: Account<'info, TokenAccount>,
+    /// Owner's NFT token account. Validated in handler (mint match + owner +
+    /// amount >= 1) via manual SPL TokenAccount::unpack.
+    /// CHECK: validated in handler.
+    #[account(mut)]
+    pub owner_nft_account: AccountInfo<'info>,
 
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -1089,6 +1237,117 @@ pub struct FractionalizeNFT<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+// [stack-fix 2026-05-19] Split-fractionalize step 1/3: init fractional_nft.
+// Single `init` account + no Mint/TokenAccount Anchor caches → ~2KB frame.
+#[derive(Accounts)]
+pub struct InitFractionalState<'info> {
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 1 + 8 + 2 + 1 + 16 + 8,
+        seeds = [b"fractional_nft", nft_mint.key().as_ref()],
+        bump
+    )]
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
+
+    /// CHECK: validated in handler via SPL Mint::unpack.
+    pub nft_mint: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+// [stack-fix 2026-05-19] Split-fractionalize step 2/3: init fragment_mint.
+// Single `init` account. fractional_nft is read-only here so its cache cost
+// is minimal (~280B for Box<Account<FractionalNFT>>).
+#[derive(Accounts)]
+pub struct InitFragmentMint<'info> {
+    #[account(
+        mut,
+        seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
+        bump = fractional_nft.bump,
+        constraint = fractional_nft.original_owner == owner.key() @ ErrorCode::Unauthorized,
+    )]
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
+
+    /// CHECK: pda-only; bound by seeds.
+    /// PDA = ["fragment_mint", original_nft]; the seed pulls original_nft
+    /// from the stored state PDA, so no separate nft_mint account is needed.
+    #[account(
+        init,
+        payer = owner,
+        mint::decimals = 0,
+        mint::authority = fractional_nft,
+        seeds = [b"fragment_mint", fractional_nft.original_nft.as_ref()],
+        bump
+    )]
+    pub fragment_mint: Box<Account<'info, Mint>>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+// [stack-fix 2026-05-19] Split-fractionalize step 3/3: init nft_vault +
+// revenue_vault, transfer NFT, mark active. Two `init` accounts + one
+// AccountInfo source token account → fits in ~3KB frame.
+#[derive(Accounts)]
+pub struct InitVaultsAndLock<'info> {
+    #[account(
+        mut,
+        seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
+        bump = fractional_nft.bump,
+        constraint = fractional_nft.original_owner == owner.key() @ ErrorCode::Unauthorized,
+    )]
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
+
+    /// CHECK: validated in handler via SPL Mint::unpack (NFT shape check
+    /// already done at step 1; we only need its pubkey here for the
+    /// `nft_vault` seed binding).
+    #[account(constraint = nft_mint.key() == fractional_nft.original_nft @ ErrorCode::InvalidNftMint)]
+    pub nft_mint: AccountInfo<'info>,
+
+    /// NFT vault to hold the original NFT.
+    #[account(
+        init,
+        payer = owner,
+        token::mint = nft_mint,
+        token::authority = fractional_nft,
+        seeds = [b"nft_vault", fractional_nft.original_nft.as_ref()],
+        bump
+    )]
+    pub nft_vault: Box<Account<'info, TokenAccount>>,
+
+    /// Revenue vault to hold SOL.
+    #[account(
+        init,
+        payer = owner,
+        space = 8,
+        seeds = [b"revenue_vault", fractional_nft.original_nft.as_ref()],
+        bump
+    )]
+    /// CHECK: PDA-owned SOL escrow.
+    pub revenue_vault: AccountInfo<'info>,
+
+    /// CHECK: validated in handler via SPL TokenAccount::unpack.
+    #[account(mut)]
+    pub owner_nft_account: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 pub struct BuyFragment<'info> {
     #[account(
@@ -1096,7 +1355,7 @@ pub struct BuyFragment<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     // [audit fix C-F1] Pin the fragment mint to the program-derived mint.
     #[account(
@@ -1105,7 +1364,7 @@ pub struct BuyFragment<'info> {
         bump,
         constraint = fragment_mint.key() == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
     )]
-    pub fragment_mint: Account<'info, Mint>,
+    pub fragment_mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
@@ -1127,7 +1386,7 @@ pub struct BuyFragment<'info> {
         seeds = [b"fragment_holder", fractional_nft.key().as_ref(), buyer.key().as_ref()],
         bump
     )]
-    pub fragment_holder: Account<'info, FragmentHolder>,
+    pub fragment_holder: Box<Account<'info, FragmentHolder>>,
 
     // [audit fix C-F1] Buyer's fragment ATA: must reference fragment_mint
     // and be owned by buyer. Without this, the buyer can mint fragments
@@ -1138,7 +1397,7 @@ pub struct BuyFragment<'info> {
         constraint = buyer_fragment_account.mint == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
         constraint = buyer_fragment_account.owner == buyer.key() @ ErrorCode::Unauthorized,
     )]
-    pub buyer_fragment_account: Account<'info, TokenAccount>,
+    pub buyer_fragment_account: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -1147,6 +1406,7 @@ pub struct BuyFragment<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 pub struct SellFragment<'info> {
     #[account(
@@ -1154,7 +1414,7 @@ pub struct SellFragment<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
@@ -1162,7 +1422,7 @@ pub struct SellFragment<'info> {
         bump,
         constraint = fragment_mint.key() == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
     )]
-    pub fragment_mint: Account<'info, Mint>,
+    pub fragment_mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
@@ -1180,7 +1440,7 @@ pub struct SellFragment<'info> {
         bump = fragment_holder.bump,
         constraint = fragment_holder.holder == seller.key() @ ErrorCode::InvalidHolder,
     )]
-    pub fragment_holder: Account<'info, FragmentHolder>,
+    pub fragment_holder: Box<Account<'info, FragmentHolder>>,
 
     // [audit fix C-F1] Seller's fragment ATA pinned to the official
     // fragment_mint and verified owner. Token program enforces owner-on-burn
@@ -1190,13 +1450,13 @@ pub struct SellFragment<'info> {
         constraint = seller_fragment_account.mint == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
         constraint = seller_fragment_account.owner == seller.key() @ ErrorCode::Unauthorized,
     )]
-    pub seller_fragment_account: Account<'info, TokenAccount>,
+    pub seller_fragment_account: Box<Account<'info, TokenAccount>>,
 
     /// [audit fix round2 R2-H-F2] Optional license_vote PDA: required only
     /// when the seller has an OPEN vote (voted_proposal_id != u64::MAX).
     /// If present, the handler verifies it matches the holder's open vote
     /// and that the vote is finalized before allowing the sell.
-    pub license_vote: Option<Account<'info, LicenseVote>>,
+    pub license_vote: Option<Box<Account<'info, LicenseVote>>>,
 
     #[account(mut)]
     pub seller: Signer<'info>,
@@ -1205,6 +1465,7 @@ pub struct SellFragment<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 pub struct DistributeRevenue<'info> {
     #[account(
@@ -1212,7 +1473,7 @@ pub struct DistributeRevenue<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
@@ -1236,7 +1497,7 @@ pub struct DistributeRevenue<'info> {
         ],
         bump,
     )]
-    pub revenue_epoch: Account<'info, RevenueEpoch>,
+    pub revenue_epoch: Box<Account<'info, RevenueEpoch>>,
 
     // [audit fix C-F5] Only PROGRAM_ADMIN may call distribute_revenue. The
     // actual SOL is CPI-transferred from authority → revenue_vault, so
@@ -1247,6 +1508,7 @@ pub struct DistributeRevenue<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 pub struct ClaimRevenue<'info> {
     #[account(
@@ -1254,7 +1516,7 @@ pub struct ClaimRevenue<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
@@ -1262,7 +1524,7 @@ pub struct ClaimRevenue<'info> {
         bump = fragment_holder.bump,
         constraint = fragment_holder.holder == holder.key() @ ErrorCode::InvalidHolder,
     )]
-    pub fragment_holder: Account<'info, FragmentHolder>,
+    pub fragment_holder: Box<Account<'info, FragmentHolder>>,
 
     #[account(
         mut,
@@ -1286,11 +1548,12 @@ pub struct UpdateVoteThreshold<'info> {
         bump = fractional_nft.bump,
         constraint = fractional_nft.original_owner == owner.key() @ ErrorCode::Unauthorized,
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     pub owner: Signer<'info>,
 }
 
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 #[instruction(license_proposal_id: u64)]
 pub struct VoteOnLicense<'info> {
@@ -1298,7 +1561,7 @@ pub struct VoteOnLicense<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
@@ -1306,7 +1569,7 @@ pub struct VoteOnLicense<'info> {
         bump = fragment_holder.bump,
         constraint = fragment_holder.holder == voter.key() @ ErrorCode::InvalidHolder,
     )]
-    pub fragment_holder: Account<'info, FragmentHolder>,
+    pub fragment_holder: Box<Account<'info, FragmentHolder>>,
 
     #[account(
         init_if_needed,
@@ -1315,7 +1578,7 @@ pub struct VoteOnLicense<'info> {
         seeds = [b"license_vote", fractional_nft.key().as_ref(), license_proposal_id.to_le_bytes().as_ref()],
         bump
     )]
-    pub license_vote: Account<'info, LicenseVote>,
+    pub license_vote: Box<Account<'info, LicenseVote>>,
 
     #[account(mut)]
     pub voter: Signer<'info>,
@@ -1329,18 +1592,19 @@ pub struct FinalizeLicenseVote<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
         seeds = [b"license_vote", fractional_nft.key().as_ref(), license_vote.proposal_id.to_le_bytes().as_ref()],
         bump = license_vote.bump
     )]
-    pub license_vote: Account<'info, LicenseVote>,
+    pub license_vote: Box<Account<'info, LicenseVote>>,
 
     pub authority: Signer<'info>,
 }
 
+// [stack-fix 2026-05-19] Box-ified to stay under 4KB BPF stack frame.
 #[derive(Accounts)]
 pub struct ReclaimNFT<'info> {
     #[account(
@@ -1348,7 +1612,7 @@ pub struct ReclaimNFT<'info> {
         seeds = [b"fractional_nft", fractional_nft.original_nft.as_ref()],
         bump = fractional_nft.bump
     )]
-    pub fractional_nft: Account<'info, FractionalNFT>,
+    pub fractional_nft: Box<Account<'info, FractionalNFT>>,
 
     #[account(
         mut,
@@ -1356,7 +1620,7 @@ pub struct ReclaimNFT<'info> {
         bump = fragment_holder.bump,
         constraint = fragment_holder.holder == owner.key() @ ErrorCode::InvalidHolder,
     )]
-    pub fragment_holder: Account<'info, FragmentHolder>,
+    pub fragment_holder: Box<Account<'info, FragmentHolder>>,
 
     // [audit fix C-F7] fragment_mint required for the burn CPI.
     #[account(
@@ -1365,7 +1629,7 @@ pub struct ReclaimNFT<'info> {
         bump,
         constraint = fragment_mint.key() == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
     )]
-    pub fragment_mint: Account<'info, Mint>,
+    pub fragment_mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
@@ -1373,7 +1637,7 @@ pub struct ReclaimNFT<'info> {
         bump,
         constraint = nft_vault.mint == fractional_nft.original_nft @ ErrorCode::InvalidNftAccount,
     )]
-    pub nft_vault: Account<'info, TokenAccount>,
+    pub nft_vault: Box<Account<'info, TokenAccount>>,
 
     // [audit fix C-F7] Revenue vault required so we can sweep remaining
     // lamports back to the original owner on reclaim.
@@ -1392,7 +1656,7 @@ pub struct ReclaimNFT<'info> {
         constraint = owner_nft_account.mint == fractional_nft.original_nft @ ErrorCode::InvalidNftAccount,
         constraint = owner_nft_account.owner == owner.key() @ ErrorCode::Unauthorized,
     )]
-    pub owner_nft_account: Account<'info, TokenAccount>,
+    pub owner_nft_account: Box<Account<'info, TokenAccount>>,
 
     // [audit fix C-F7] Owner's fragment ATA — required to burn the
     // fragments they own. Pinned to the fragment mint and signer.
@@ -1401,7 +1665,7 @@ pub struct ReclaimNFT<'info> {
         constraint = owner_fragment_account.mint == fractional_nft.fragment_mint @ ErrorCode::InvalidMint,
         constraint = owner_fragment_account.owner == owner.key() @ ErrorCode::Unauthorized,
     )]
-    pub owner_fragment_account: Account<'info, TokenAccount>,
+    pub owner_fragment_account: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
     pub owner: Signer<'info>,

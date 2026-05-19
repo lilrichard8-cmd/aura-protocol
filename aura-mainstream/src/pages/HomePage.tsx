@@ -7,6 +7,7 @@ import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
 import { useUserPosts } from '@/hooks/useUserPosts';
+import { useAggregatedUserPosts } from '@/hooks/useAggregatedUserPosts';
 
 export default function HomePage() {
   const { t } = useI18n();
@@ -16,6 +17,11 @@ export default function HomePage() {
   // regardless of follow graph — you should see your own work surfaced
   // immediately after publishing.
   const myPublishedPosts = useUserPosts(me as any);
+  // 2026-05-19 — cross-user on-chain post discovery (per-device). Pulls
+  // every `aura_user_posts:*` registry from localStorage so we can show
+  // posts from other Privy sessions / wallets that have published in
+  // this browser. Will be replaced by a Helius indexer pre-mainnet.
+  const { posts: aggregatedPosts } = useAggregatedUserPosts(me as any);
 
   // HomeFeed: own posts + followed users' content + external ads (10:1 ratio).
   // Recompute whenever followingIds or my published posts change.
@@ -26,8 +32,12 @@ export default function HomePage() {
     const organicPosts = posts.filter(post =>
       dynamicFollowingIds.includes(post.author.id)
     );
+    // Aggregated cross-user on-chain posts (stubs for other authors).
+    // Skip ones already in `myPublishedPosts` by id (deduped by PDA / id).
+    const myIds = new Set(myPublishedPosts.map(p => p.id));
+    const otherChainPosts = aggregatedPosts.filter(p => !myIds.has(p.id));
     // My own posts come first — newest at the top.
-    const merged = [...myPublishedPosts, ...organicPosts];
+    const merged = [...myPublishedPosts, ...otherChainPosts, ...organicPosts];
     const out: typeof posts = [];
     merged.forEach((post, i) => {
       out.push(post);
@@ -36,7 +46,7 @@ export default function HomePage() {
       }
     });
     return out;
-  }, [mockChain.followingIds, myPublishedPosts]);
+  }, [mockChain.followingIds, myPublishedPosts, aggregatedPosts]);
 
   const [refreshing, setRefreshing] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);

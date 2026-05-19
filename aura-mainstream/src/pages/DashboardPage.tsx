@@ -11,8 +11,13 @@
 // numbers from deterministic hashes of the post id (so they stay stable
 // across reloads).
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConnection } from '@solana/wallet-adapter-react';
+import { LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { useOraContract } from '@/hooks/useOraContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
+import { useChainTxHistory } from '@/hooks/useChainTxHistory';
 import {
   TrendingUp, TrendingDown, Eye, Users, Coins, Vault, CheckCircle,
   LayoutDashboard, FileText, Trophy, Wallet, ArrowUpRight, ArrowDownRight,
@@ -186,6 +191,44 @@ function OverviewTab({
   // Removed t/d (was used for hardcoded mock chart data).
   const mockChain = useMockChain();
 
+  // 2026-05-19 Tier 2 — real-chain bridge. When ORA real-chain is on,
+  // KPI tiles read live SPL + SOL balance; otherwise we fall back to
+  // mockChain values. The activity feed also splices in the most recent
+  // on-chain signatures so it stops looking empty after refreshes.
+  const onChain = useOraContract();
+  const uw = useUnifiedWallet();
+  const { connection } = useConnection();
+  const chainHistory = useChainTxHistory();
+  const liveChain = onChain.enabled && uw.publicKey !== null;
+  const [chainOra, setChainOra] = useState<number | null>(null);
+  const [chainSol, setChainSol] = useState<number | null>(null);
+  useEffect(() => {
+    if (!liveChain || !uw.publicKey) {
+      setChainOra(null);
+      setChainSol(null);
+      return;
+    }
+    let cancel = false;
+    const owner = uw.publicKey;
+    const tick = async () => {
+      try {
+        const [oraRaw, lamports] = await Promise.all([
+          onChain.getBalance(owner),
+          connection.getBalance(owner),
+        ]);
+        if (cancel) return;
+        setChainOra(Number(oraRaw) / Math.pow(10, onChain.decimals));
+        setChainSol(lamports / LAMPORTS_PER_SOL);
+      } catch { /* keep last value */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => { cancel = true; window.clearInterval(id); };
+  }, [liveChain, uw.publicKey, onChain, connection]);
+
+  const displayedOra = liveChain && chainOra != null ? chainOra : mockChain.oraBalance;
+  const displayedSol = liveChain && chainSol != null ? chainSol : mockChain.solBalance;
+
   // Roll-ups straight from on-chain primitives. No fake fallbacks.
   const totalLikes = postMetrics.reduce((s, m) => s + m.likes, 0);
   const totalComments = postMetrics.reduce((s, m) => s + m.comments, 0);
@@ -199,8 +242,24 @@ function OverviewTab({
   const votedCount = Object.keys(mockChain.myVotes).length;
   // Latest CC trade event (one-line teaser when present).
   const latestCoinTrade = mockChain.ownCoinTrades[0];
-  // Recent transactions for activity feed (last 5)
-  const recentTx = mockChain.transactions.slice(0, 5);
+  // Recent transactions for activity feed (last 5). Real chain rows are
+  // merged in front when present so the feed stops looking empty.
+  const recentTx = useMemo(() => {
+    const seen = new Set(mockChain.transactions.map((t) => t.txHash));
+    const chainRows = chainHistory.txs
+      .filter((c) => !seen.has(c.txHash))
+      .map((c) => ({
+        id: c.id,
+        type: 'send' as const,
+        amount: c.amount,
+        timestamp: c.timestamp,
+        txHash: c.txHash,
+        details: c.details,
+      }));
+    return [...chainRows, ...mockChain.transactions]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 5);
+  }, [mockChain.transactions, chainHistory.txs]);
 
   return (
     <div className="space-y-5">
@@ -208,9 +267,9 @@ function OverviewTab({
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <KpiTile
           icon={<Coins className="w-4 h-4" />}
-          label="ORA balance"
-          value={mockChain.oraBalance.toFixed(2)}
-          unit={`${mockChain.solBalance.toFixed(2)} SOL`}
+          label={liveChain ? 'ORA balance (on-chain)' : 'ORA balance'}
+          value={displayedOra.toFixed(2)}
+          unit={`${displayedSol.toFixed(2)} SOL`}
           tone="aura"
         />
         <KpiTile

@@ -65,6 +65,11 @@ export interface Post {
   tags: string[];
   createdAt: string;
   viewerCount?: number;
+  /** Optional on-chain Solana post PDA (base58). Set when the post was
+   *  published via the Core program (aura_core publishContent). Pages
+   *  that need live like/comment counts read this and call
+   *  `coreOnChain.fetchPost(postPda)` to refresh from the chain. */
+  onChainPostPda?: string;
 }
 
 export interface Comment {

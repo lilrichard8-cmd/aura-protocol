@@ -18,10 +18,12 @@
 //   │ 📦 Redemptions queue (RedemptionsContent)  │ │               │
 //   └────────────────────────────────────────────┘ └───────────────┘
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
+import { useCreatorCoinContract, type CreatorCoinOnChain } from '@/hooks/useCreatorCoinContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 import {
   Coins, TrendingUp, Users, Sparkles, ExternalLink,
   Share2, Megaphone, Bell, Lock, Activity, Package,
@@ -54,6 +56,14 @@ export default function CoinStudioPage() {
   const mockChain = useMockChain();
   const { showToast } = useToast();
   const { user } = useAuth();
+  // Real-chain read bridge — VITE_CREATOR_COIN_REAL_CHAIN=true populates live
+  // supply/price/locked numbers from the on-chain CreatorCoin account. We
+  // keep mockChain as the canonical UI source (which already mirrors the
+  // mint result via MintCeremony) and only overlay the on-chain values when
+  // the read succeeds; otherwise we silently fall back to mock.
+  const onChain = useCreatorCoinContract();
+  const uw = useUnifiedWallet();
+  const [chainCoin, setChainCoin] = useState<CreatorCoinOnChain | null>(null);
   // Mint modal state — hoisted above the conditional return so hooks order
   // stays stable whether or not the user has already minted.
   const [showMintModal, setShowMintModal] = useState(false);
@@ -114,18 +124,46 @@ export default function CoinStudioPage() {
   const symbol = mockChain.creatorCoinSymbol;
   const ticker = symbol;
   const myCoin = mockChain.creatorCoins.find(c => c.symbol === symbol);
+  // Live chain refresh — fires when the wallet/module first becomes available
+  // and again whenever the mock state changes (so we re-fetch after every
+  // ceremony). Polling is intentionally sparse: this dashboard isn't a hot
+  // trading view, and the wallet won't routinely change.
+  useEffect(() => {
+    if (!onChain.enabled || !onChain.module || !uw.publicKey) {
+      setChainCoin(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const live = await onChain.fetchCoin(uw.publicKey!);
+        if (!cancelled) setChainCoin(live);
+      } catch {
+        if (!cancelled) setChainCoin(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onChain.enabled, onChain.module, uw.publicKey, mockChain.creatorCoinVestingMonth, mockChain.creatorCoinBalance]);
+  // Live-chain values overlay mock display when available. The chain stores
+  // amounts in 9-decimal base units; we scale back for the UI which expects
+  // human-readable token counts (matching the mock's 0–2000 range).
+  const chainCirculating = chainCoin ? Number(chainCoin.circulatingSupply) / 1e9 : null;
+  const chainLocked = chainCoin ? Number(chainCoin.lockedSupply) / 1e9 : null;
+  const chainInitialPrice = chainCoin ? Number(chainCoin.initialPrice) / 1e9 : null;
+  const chainMonthsUnlocked = chainCoin ? chainCoin.monthsUnlocked : null;
   const balance = mockChain.creatorCoinBalance ?? 0;
   const reserved = myCoin?.reservedAmount ?? 0;
-  const locked = mockChain.creatorCoinLocked ?? 0;
-  const vestingMonth = mockChain.creatorCoinVestingMonth ?? 0;
-  const initialPrice = myCoin?.initialPrice ?? 1;
+  const locked = chainLocked ?? (mockChain.creatorCoinLocked ?? 0);
+  const vestingMonth = chainMonthsUnlocked ?? (mockChain.creatorCoinVestingMonth ?? 0);
+  const initialPrice = chainInitialPrice ?? (myCoin?.initialPrice ?? 1);
   const benefits = myCoin?.benefits ?? [];
   const holders = mockChain.ownCoinHolders;
   const trades = mockChain.ownCoinTrades;
   const totalHolders = mockChain.ownCoinHolders.length;
 
   const holdersTotal = holders.reduce((s, h) => s + h.amount, 0);
-  const totalCirculating = balance + reserved + holdersTotal;
+  // Prefer on-chain circulating supply when available; mock fallback otherwise.
+  const totalCirculating = chainCirculating ?? (balance + reserved + holdersTotal);
   const earnedFromTrades = trades.reduce((s, t) => s + t.total * 0.95, 0);
 
   // Pending redemption fulfillments — biggest action item.

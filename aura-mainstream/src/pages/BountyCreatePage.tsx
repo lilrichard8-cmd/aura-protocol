@@ -19,7 +19,7 @@
  * 2026-05-11 R13 — first cut.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Briefcase, Hash, Plus, Upload, FileText, Trash2, X, ChevronRight,
@@ -31,6 +31,8 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/context/ToastContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useBountyContract } from '@/hooks/useBountyContract';
+import { useOraContract } from '@/hooks/useOraContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 
 type UploadedFile = { id: string; name: string; size: string };
 
@@ -49,12 +51,20 @@ type CategoryId = typeof CATEGORIES[number]['id'];
 const TITLE_MAX = 80;
 const DESC_MAX = 4000;
 const MIN_REWARD = 10;
+// H-2 — The on-chain Bounty V2 metadata URI field is capped at 200 chars
+// (BOUNTY_V2_LIMITS.URI_MAX). After `data:text/plain;base64,` (23 chars)
+// + base64 expansion (~4 chars per 3 input bytes), a safe budget is
+// roughly 80 plain-text chars. Anything longer is rejected up-front
+// rather than silently truncated to garbage.
+const BRIEF_CHAIN_MAX_CHARS = 80;
 
 export default function BountyCreatePage() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const mockChain = useMockChain();
   const onChain = useBountyContract();
+  const oraOnChain = useOraContract();
+  const uw = useUnifiedWallet();
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -66,18 +76,78 @@ export default function BountyCreatePage() {
   const [uploaded, setUploaded] = useState<UploadedFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
+  // C-1 — Read the real on-chain ORA balance when bounty real-chain mode
+  // is enabled. The mockChain balance was a placeholder (newAccountStarter
+  // = 10 ORA) that didn't match the user's actual on-chain holdings, which
+  // blocked the most common demo flow ("I have 1000 ORA, why can't I post
+  // a 50 ORA bounty?"). We fall back to mockChain only when:
+  //   • real-chain mode is off, OR
+  //   • the wallet hasn't synced yet (chainOraBalance === null), OR
+  //   • the RPC read failed (handled by leaving null).
+  const [chainOraBalance, setChainOraBalance] = useState<number | null>(null);
+  const [chainBalanceLoading, setChainBalanceLoading] = useState(false);
+  useEffect(() => {
+    if (!onChain.enabled || !oraOnChain.enabled || !uw.publicKey) {
+      setChainOraBalance(null);
+      setChainBalanceLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setChainBalanceLoading(true);
+    const owner = uw.publicKey;
+    (async () => {
+      try {
+        const raw = await oraOnChain.getBalance(owner);
+        if (!cancelled) {
+          setChainOraBalance(Number(raw) / Math.pow(10, oraOnChain.decimals));
+        }
+      } catch {
+        if (!cancelled) setChainOraBalance(null);
+      } finally {
+        if (!cancelled) setChainBalanceLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onChain.enabled, oraOnChain.enabled, oraOnChain, uw.publicKey]);
+
+  const liveBalanceMode = onChain.enabled && oraOnChain.enabled && uw.publicKey !== null;
+  const effectiveOraBalance = liveBalanceMode && chainOraBalance !== null
+    ? chainOraBalance
+    : mockChain.oraBalance;
+
   const titleLen = title.trim().length;
   const descLen = description.trim().length;
   const rewardNum = Number(reward);
+  // M-1 — In Privy read-only mode, publicKey is non-null but `source`
+  // remains null until the wallets hook syncs. We can't sign yet, so the
+  // Submit button is disabled with a " wallet syncing " hint instead of
+  // throwing a confusing "No wallet connected" error mid-tx.
+  const walletSyncing = onChain.enabled && uw.publicKey !== null && uw.source === null;
+  // H-2 — We need to pre-validate brief length for the on-chain path
+  // because the V2 metadataUri field is capped at 200 chars. See comment
+  // on BRIEF_CHAIN_MAX_CHARS above.
+  const briefTooLongForChain = onChain.enabled && descLen > BRIEF_CHAIN_MAX_CHARS;
+
+  // C-1 — Balance check now uses `effectiveOraBalance`. While the chain
+  // balance is still loading we deliberately treat the row as indeterminate
+  // (passes the gate) so the user isn't blocked by a transient null read.
+  const balanceCheck = chainBalanceLoading
+    ? true
+    : effectiveOraBalance >= rewardNum;
 
   const checks = useMemo(() => ({
     title: titleLen >= 4 && titleLen <= TITLE_MAX,
-    description: descLen >= 30 && descLen <= DESC_MAX,
+    description: descLen >= 30 && descLen <= DESC_MAX && !briefTooLongForChain,
     reward: Number.isFinite(rewardNum) && rewardNum >= MIN_REWARD,
-    balance: mockChain.oraBalance >= rewardNum,
-  }), [titleLen, descLen, rewardNum, mockChain.oraBalance]);
+    balance: balanceCheck,
+  }), [titleLen, descLen, rewardNum, balanceCheck, briefTooLongForChain]);
 
-  const canSubmit = checks.title && checks.description && checks.reward && checks.balance;
+  const canSubmit =
+    checks.title
+    && checks.description
+    && checks.reward
+    && checks.balance
+    && !walletSyncing;
 
   const addTag = () => {
     const v = tagInput.trim().toLowerCase();
@@ -121,11 +191,30 @@ export default function BountyCreatePage() {
         // Real on-chain path. The wallet adapter must be connected.
         const sponsor = (onChain.module as any).wallet?.publicKey;
         if (!sponsor) throw new Error('Connect a Solana wallet first.');
+        // Ensure the per-sponsor bounty counter PDA exists. Idempotent.
+        try {
+          await onChain.module.ensureBountyCounter();
+        } catch (counterErr) {
+          // Most likely "already exists" — fetchBounty later confirms id alignment.
+          // eslint-disable-next-line no-console
+          console.info('[BountyCreate] ensureBountyCounter:', counterErr);
+        }
         const bountyId = await onChain.module.nextBountyId(sponsor);
         const deadline = Math.floor(Date.now() / 1000) + deadlineDays * 86400;
-        // Use the trimmed title verbatim; brief + metadata go into the URI.
-        // For now we encode the enriched description inline via data URL.
-        const metadataUri = `data:text/plain;base64,${btoa(unescape(encodeURIComponent(enrichedDesc))).slice(0, 200)}`;
+        // H-2 — Compress brief to a length we know base64+prefix fits in
+        // BOUNTY_V2_LIMITS.URI_MAX (200 chars). We use the *trimmed user
+        // brief only* for the on-chain URI (no metadata footer) so the
+        // detail page decodes back into something the creator typed.
+        // The full enriched description still lives off-chain (we'll move
+        // it to IPFS later); for now it's lost on-chain by design.
+        const briefForChain = description.trim().slice(0, BRIEF_CHAIN_MAX_CHARS);
+        const metadataUri = `data:text/plain;base64,${btoa(unescape(encodeURIComponent(briefForChain)))}`;
+        if (metadataUri.length > 200) {
+          throw new Error(
+            `Brief too long for on-chain URI (${metadataUri.length}/200). ` +
+            `Please shorten the brief to ≤ ${BRIEF_CHAIN_MAX_CHARS} chars.`,
+          );
+        }
         const res = await onChain.module.createBounty({
           bountyId,
           totalReward: BigInt(rewardNum) * 1_000_000_000n, // assume 9 decimals
@@ -137,7 +226,14 @@ export default function BountyCreatePage() {
           isOfficial: false,
         });
         if (!res.success) throw new Error(res.error || 'on-chain create failed');
+        const bountyPda = (res as { bounty?: { toBase58: () => string } }).bounty?.toBase58();
         showToast('success', 'Bounty posted on-chain', `${rewardNum} ORA escrowed. tx: ${res.signature.slice(0, 8)}…`);
+        // Redirect to the detail page with the on-chain PDA so the creator
+        // can immediately share the link with submitters.
+        if (bountyPda) {
+          navigate(`/marketplace/bounty/${bountyPda}?pda=${bountyPda}`);
+          return;
+        }
       } else {
         await mockChain.createBounty(title.trim(), enrichedDesc, rewardNum);
         showToast('success', `Bounty posted`, `${rewardNum} ORA escrowed. Open it in Studio → Bounties.`);
@@ -200,7 +296,10 @@ export default function BountyCreatePage() {
           canSubmit={canSubmit}
           submitting={submitting}
           handleSubmit={handleSubmit}
-          oraBalance={mockChain.oraBalance}
+          oraBalance={effectiveOraBalance}
+          balanceLoading={chainBalanceLoading}
+          walletSyncing={walletSyncing}
+          briefTooLongForChain={briefTooLongForChain}
         />
       </div>
 
@@ -224,7 +323,10 @@ export default function BountyCreatePage() {
           canSubmit={canSubmit}
           submitting={submitting}
           handleSubmit={handleSubmit}
-          oraBalance={mockChain.oraBalance}
+          oraBalance={effectiveOraBalance}
+          balanceLoading={chainBalanceLoading}
+          walletSyncing={walletSyncing}
+          briefTooLongForChain={briefTooLongForChain}
         />
       </div>
     </div>
@@ -387,10 +489,14 @@ function SidebarPane(props: {
   submitting: boolean;
   handleSubmit: () => void;
   oraBalance: number;
+  balanceLoading?: boolean;
+  walletSyncing?: boolean;
+  briefTooLongForChain?: boolean;
 }) {
   const {
     reward, setReward, category, setCategory, deadlineDays, setDeadlineDays,
     checks, canSubmit, submitting, handleSubmit, oraBalance,
+    balanceLoading, walletSyncing, briefTooLongForChain,
   } = props;
 
   const rewardNum = Number(reward);
@@ -422,9 +528,13 @@ function SidebarPane(props: {
           </div>
           <div className="mt-1.5 flex items-center justify-between text-[11px]">
             <span className="text-muted-foreground">Min {MIN_REWARD} ORA</span>
-            <span className={oraBalance < rewardNum ? 'text-red-500' : 'text-muted-foreground'}>
-              Balance: {oraBalance.toFixed(2)} ORA
-            </span>
+            {balanceLoading ? (
+              <span className="text-muted-foreground italic">Checking balance…</span>
+            ) : (
+              <span className={oraBalance < rewardNum ? 'text-red-500' : 'text-muted-foreground'}>
+                Balance: {oraBalance.toFixed(2)} ORA
+              </span>
+            )}
           </div>
         </div>
         <div className="text-[11px] text-muted-foreground bg-muted/40 rounded-lg p-2.5 leading-relaxed">
@@ -505,9 +615,14 @@ function SidebarPane(props: {
         <h3 className="text-sm font-semibold">Before posting</h3>
         <ul className="space-y-1.5 text-xs">
           <Check ok={checks.title}>Title is 4–{TITLE_MAX} chars</Check>
-          <Check ok={checks.description}>Brief is at least 30 chars</Check>
+          <Check ok={checks.description}>
+            Brief is 30–{briefTooLongForChain ? 80 : DESC_MAX} chars
+            {briefTooLongForChain && ' (on-chain limit)'}
+          </Check>
           <Check ok={checks.reward}>Reward ≥ {MIN_REWARD} ORA</Check>
-          <Check ok={checks.balance}>Wallet has enough ORA to escrow</Check>
+          <Check ok={checks.balance}>
+            {balanceLoading ? 'Checking balance…' : 'Wallet has enough ORA to escrow'}
+          </Check>
         </ul>
         <Button
           disabled={!canSubmit || submitting}
@@ -516,15 +631,29 @@ function SidebarPane(props: {
         >
           {submitting
             ? 'Posting…'
-            : validReward
-              ? `Escrow ${rewardNum} ORA & post`
-              : 'Post bounty'}
+            : walletSyncing
+              ? 'Wallet syncing…'
+              : validReward
+                ? `Escrow ${rewardNum} ORA & post`
+                : 'Post bounty'}
           <ChevronRight className="w-4 h-4 ml-1" />
         </Button>
-        {!checks.balance && validReward && (
+        {!checks.balance && validReward && !balanceLoading && (
           <p className="text-[11px] text-red-500 inline-flex items-start gap-1 leading-tight">
             <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
             Not enough ORA. Top up before posting.
+          </p>
+        )}
+        {walletSyncing && (
+          <p className="text-[11px] text-amber-500 inline-flex items-start gap-1 leading-tight">
+            <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+            Wallet still syncing. One moment…
+          </p>
+        )}
+        {briefTooLongForChain && (
+          <p className="text-[11px] text-red-500 inline-flex items-start gap-1 leading-tight">
+            <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+            On-chain mode caps the brief at {BRIEF_CHAIN_MAX_CHARS} chars. Move the rest into a reference link.
           </p>
         )}
       </div>

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount, Transfer};
 
-declare_id!("Bfwu9gQFyYsaURqDSVYwsfB5VXwGgbTHbSgrzEhNtbuR");
+declare_id!("5Zit5jo7zH1ca2TxqJaDckYdsZqfaPAEFWgjS8bnw5AY");
 
 // [audit fix C4.M-1 option-C] Hardcoded `aura_ora` program id. Only the
 // `aura_ora` program is permitted to CPI into the `mint_for_*` wrappers
@@ -79,7 +79,8 @@ pub const PER_CALL_DISTRIBUTION_CAP: u64 = 100_000 * 1_000_000_000;
 // ⚠️ DO NOT DEPLOY — placeholder; replace with the real protocol multisig
 // before mainnet deploy. The distributor is the ONLY signer permitted to
 // invoke `distribute_creation_reward` / `distribute_curation_reward`.
-pub const REWARD_DISTRIBUTOR: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const REWARD_DISTRIBUTOR: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 #[program]
 pub mod aura_rewards {

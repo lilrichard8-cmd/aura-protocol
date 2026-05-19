@@ -1,20 +1,27 @@
+[toolchain]
+
 [features]
-seeds = false
+resolution = true
 skip-lint = false
 
 [programs.localnet]
-aura_creator_coin = "B38n2DX7BR4tEait7Pn3SHUwB29WQt4U8jttCQgJZ57w"
-aura_market = "5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV"
-aura_governance = "7Un16eWXCteD3PgjpYWggCjuQK2tneHDkwGXvUg5obBk"
-aura_core = "Ho5Ent8c2D6eLAZuyW16iUekqMmpfqzoTspXbMQqa9JN"
-aura_vault = "9sefu7Jr4kAdASSro3AHpTp7XVcShveDntZWvPeJczNL"
-aura_curation = "D1FvbNBVZRvjJYVHNSHZKE653PWCNjb2cfEjNgNxYvc8"
-aura_social_graph = "GxvZT4AX7FUCv6HJTVFYPaFciH4ktsDVmXTgGjTZFnUN"
-aura_content_license = "9PK5h7iiAM87nSxRC8R9u8K8gJAEANiNNKD7AuhbWuwE"
-aura_reputation = "GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg"
-aura_fractionalize = "3AQUkL1ayeJPHS2kYRRpsrACmrXmhKDYjhLsvwGUaw1S"
-# [whitepaper-sync v1.1] §5.6 launch-incentives
-aura_launch_incentives = "GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf"
+aura_content_license = "8AmchauzdkEt2ZafZbac9NT8BGwLaL2sVwwQxKbSgis"
+aura_core = "4VTNh4tcTuF5wDYhP8qbvf5hdUV4xUm7KJVJd9oSweEE"
+aura_creator_coin = "DW4BZcwY5c3nQHMGKysmTdXKpFous778RKcbSvw2xNMZ"
+aura_curation = "DimxL8QLZ5xPrq4igyuZbU52cfL81eVzEoani45Z63h7"
+aura_fractionalize = "2QPBHcFbYc9UwoS5KBoGRcZ5Db4idyN1GxnbAuBLY38h"
+aura_governance = "E9RGmKxpRKZ8hX5GnrgBq1aTayY7JGH5kzwBoN5RZxyT"
+aura_launch_incentives = "4ujsepHLzxwbFfX8VbPtxGYxBMnb1WKnQybEgS9gWJHD"
+aura_livestream = "Bhni5CRZwqPGS9PhvUQtnKFpDs1vjZ4ckYaFayfNQeqH"
+aura_market = "9YgDaCgqqHhztHEr8TDBmX3ffrdHw9nMXt2tZXjBA2sc"
+aura_ora = "BU6sgGN6a8pbzjQasfghumnqG5UEaUSsJ3mWc1gQU2tb"
+aura_reputation = "EoTfniRTgWhRD58bjUBSLk1rGR98tzfGZdVZuJXh8es8"
+aura_rewards = "5Zit5jo7zH1ca2TxqJaDckYdsZqfaPAEFWgjS8bnw5AY"
+aura_social_graph = "M7AinRcTUSR9Y8paXwE281p24hkUhQSWv7sa9bw1oC4"
+aura_staking = "BU5dKjtXCPqCffJe7GaPR8Eu1pVfgWFLAUFeHcT8ENZA"
+aura_type_b = "2Y6gMW2CRePALFRfJ4RCBTtQmJb2YHt4B5b9cHgDt9Kw"
+aura_vault = "7XdAeorsSoYDhHrJMQHuHKrPVerQvfz8zt18cEW4N3Rz"
+content_key = "CX6wqdXrR1C8sz8A7DWJ8fE2utXHivif7j1ie91i8Y3v"
 
 [registry]
 url = "https://api.apr.dev"

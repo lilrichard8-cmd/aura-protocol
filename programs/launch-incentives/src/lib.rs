@@ -23,7 +23,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 // [whitepaper-sync v1.1] §5.6 launch-incentives — program id
-declare_id!("GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf");
+declare_id!("4ujsepHLzxwbFfX8VbPtxGYxBMnb1WKnQybEgS9gWJHD");
 
 // ──────────────────────────────────────────────────────────────────────
 // [whitepaper-sync v1.1] §5.6 launch-incentives — hardcoded admin / oracles
@@ -35,7 +35,8 @@ declare_id!("GiqNJ5BbaebqvDPGep4QeK6JLNagk5zzW68pykb9eQEf");
 /// Program admin. Allowed to call all `initialize_*` and `register_*`
 /// instructions (one-time setup) plus `trigger_milestone` for the Million
 /// Plan. [whitepaper-sync v1.1] §5.6 launch-incentives
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Oracle that signs OAuth-verified external follower counts for the
 /// Creator Onboarding Program (§4.2). [whitepaper-sync v1.1] §5.6
@@ -52,12 +53,14 @@ pub const RISING_STAR_FOLLOWER_ORACLE: Pubkey =
 /// replaced post-Phase-1 with an on-chain DAU pipeline; until then admin
 /// also satisfies this check via the `=` constraint in `trigger_milestone`.
 /// [whitepaper-sync v1.1] §5.6 launch-incentives
-pub const DAU_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const DAU_ORACLE: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// Canonical ORA SPL mint. Every vault and grant binds to this mint so
 /// fake mints cannot be substituted at runtime.
 /// [whitepaper-sync v1.1] §5.6 launch-incentives
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// Million Plan vault token account (program-owned PDA at mainnet).
 /// [whitepaper-sync v1.1] §5.6 launch-incentives

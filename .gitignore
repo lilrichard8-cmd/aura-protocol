@@ -114,3 +114,20 @@ aura-afterdark/
 # Legacy backups created during refactoring
 *.legacy-bak
 *.legacy-bak2
+
+# === Local devnet state (DO NOT COMMIT — contains test private keys / local addresses) ===
+.address-book.env
+pools/
+target/dev-seed-followers.json
+*-keypair.json
+
+# === Local test diagnostics ===
+aura-mainstream/public/diag.html
+aura-mainstream/public/diag2.html
+
+# === Internal test guides (Chinese, contain Privy App ID) ===
+aura-mainstream/PRIVY_TEST_README.md
+aura-mainstream/TESTING_README.md
+
+# === Local dev env (contains real-deploy program ids that match local validator) ===
+aura-mainstream/.env.local

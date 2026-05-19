@@ -10,17 +10,20 @@ declare_id!("Bhni5CRZwqPGS9PhvUQtnKFpDs1vjZ4ckYaFayfNQeqH");
 // =============================================================================
 
 /// Canonical ORA SPL mint. All tips / subs / PPV payments must use this mint.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
 
 /// Hardcoded staking-rewards pool (token account). 2% of tips flow here.
-pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: 9byFYXdRziBe6huCRCsExz65eJMJRxkLPNReTYPzCiHS
+pub const STAKING_REWARDS_POOL: Pubkey = Pubkey::new_from_array([127, 210, 216, 137, 107, 161, 33, 182, 172, 186, 167, 117, 190, 40, 215, 32, 84, 56, 69, 15, 197, 164, 130, 140, 59, 246, 11, 42, 77, 87, 94, 69]);
 
 /// Hardcoded ops treasury (token account). 0.5% of tips + subscription
 /// fees + PPV fees flow here (protocol operations leg).
 /// [whitepaper-sync v1.1] renamed from PLATFORM_TREASURY; was a single 0.5%
 /// leg, now split into ops (0.5%) + gas reserve (0.5%) per WP §5.7.
 /// ⚠️ DO NOT DEPLOY — placeholder set to system_program::ID.
-pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PLATFORM_TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [whitepaper-sync v1.1] Hardcoded gas-reserve pool (token account).
 /// 0.5% of every livestream-channel fee flows here, matching the WP §5.7
@@ -28,12 +31,14 @@ pub const PLATFORM_TREASURY: Pubkey = anchor_lang::solana_program::system_progra
 /// dropped the gas-reserve leg, starving the pool that pays Solana base
 /// fees for new-user gas abstraction (WP §5.13).
 /// ⚠️ DO NOT DEPLOY — placeholder set to system_program::ID.
-pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: G9faGRWp35cDnGZdE38zwTisErASpYGoYcCKDvY3CPEE
+pub const GAS_RESERVE_POOL: Pubkey = Pubkey::new_from_array([225, 23, 144, 204, 122, 29, 73, 91, 161, 241, 10, 117, 27, 233, 253, 109, 104, 15, 163, 59, 61, 24, 233, 119, 245, 67, 128, 29, 70, 173, 249, 143]);
 
 /// Hardcoded protocol oracle authorised to report off-chain stats (e.g.,
 /// `peak_viewers`). [audit fix C-L4] Without this signature `end_stream`
 /// cannot mutate viewer counts.
-pub const PEAK_VIEWERS_ORACLE: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PEAK_VIEWERS_ORACLE: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [whitepaper-sync v1.1] Fee split: 5% total = 2% burn + 2% staking + 0.5%
 /// gas reserve + 0.5% ops, matching Whitepaper v1.1 §5.7 and Numbers

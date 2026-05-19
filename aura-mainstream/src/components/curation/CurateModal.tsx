@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import FeeBreakdown from '@/components/common/FeeBreakdown';
 import { useMockChain } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
+import { useCurationContract, tryParseContentId } from '@/hooks/useCurationContract';
 import {
   prospectiveRankForPost, liveFollowersFor, combinedScoreTier,
   formatMultiplier,
@@ -42,6 +43,7 @@ interface CurateModalProps {
 
 export default function CurateModal({ open, post, onClose, onCurated }: CurateModalProps) {
   const mockChain = useMockChain();
+  const curation = useCurationContract();
   const { showToast } = useToast();
   const [curating, setCurating] = useState(false);
   const [result, setResult] = useState<{ weight: string } | null>(null);
@@ -57,9 +59,37 @@ export default function CurateModal({ open, post, onClose, onCurated }: CurateMo
   const handleConfirm = async () => {
     setCurating(true);
     try {
-      const r = await mockChain.curateContent(post.id);
-      setResult(r);
-      onCurated?.(r);
+      // 2026-05-19 Tier 1.5: try real chain if enabled AND the post id is a
+      // base58 Pubkey (i.e. an on-chain PostV2 PDA). Posts that exist only in
+      // mock chain (string ids) fall through to the mock path.
+      const onChainId = curation.enabled ? tryParseContentId(post.id) : null;
+      if (curation.enabled && onChainId) {
+        const tx = await curation.curate({ contentId: onChainId });
+        if (!tx.success) {
+          // Surface a creator-friendly message for the un-initialized pool case.
+          const err = tx.error || 'on-chain curate failed';
+          if (err.startsWith('pool-not-initialized')) {
+            throw new Error(
+              "Curation pool not set up for this content yet. The creator's pool needs to be initialized by an admin.",
+            );
+          }
+          throw new Error(err);
+        }
+        // Mirror the success into mock chain so history / curated set updates
+        // visually until we wire a real-chain feed.
+        try {
+          await mockChain.curateContent(post.id);
+        } catch {
+          /* mock-side bookkeeping is non-fatal */
+        }
+        const r = { weight: `Curated on-chain (record ${tx.record?.toBase58().slice(0, 4)}…)` };
+        setResult(r);
+        onCurated?.(r);
+      } else {
+        const r = await mockChain.curateContent(post.id);
+        setResult(r);
+        onCurated?.(r);
+      }
       // Auto-close after the success animation has had time to read.
       setTimeout(() => {
         setResult(null);

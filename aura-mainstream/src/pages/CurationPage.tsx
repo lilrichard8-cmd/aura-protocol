@@ -23,6 +23,7 @@ import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
 import { useOraGuard } from '@/hooks/useOraGuard';
+import { useCurationContract } from '@/hooks/useCurationContract';
 import type { Post } from '@/types';
 
 /**
@@ -91,6 +92,11 @@ export default function CurationPage() {
   const mockChain = useMockChain();
   const { showToast } = useToast();
   const oraGuard = useOraGuard();
+  // 2026-05-19 Tier 1.5: when enabled, the actual curate transaction is sent
+  // on-chain by CurateModal via useCurationContract. The stats below still
+  // come from mock chain (no on-chain index yet); a banner explains this so
+  // demo users aren't surprised.
+  const curation = useCurationContract();
   const [activeTab, setActiveTab] = useState<'latest' | 'curated' | 'leaderboard' | 'history'>('latest');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -352,6 +358,14 @@ export default function CurationPage() {
 
       {/* Body */}
       <div className="px-4 md:px-6 pt-4">
+        {curation.enabled && (
+          <div className="mb-4 px-4 py-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
+            <span className="font-bold uppercase tracking-wider text-[10px] bg-amber-200 dark:bg-amber-800 px-1.5 py-0.5 rounded">Live</span>
+            <span>
+              Real-chain curation is on. The <b>Curate</b> button now broadcasts a Solana tx (1 ORA / curation). Stats below (rewards, score, leaderboard) are still demo data — they’ll be wired to an on-chain indexer in v0.2.
+            </span>
+          </div>
+        )}
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="w-full">
           <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="latest">Latest</TabsTrigger>

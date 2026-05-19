@@ -7,7 +7,7 @@ use rewards::cpi::accounts::MintForOra as RewardsMintForOra;
 use rewards::program::AuraRewards;
 use rewards::{self, RewardState};
 
-declare_id!("Dq6fFo2yjSuiGPhc1hwDocKhEpsSam2X8PbzbhVzTHxN");
+declare_id!("BU6sgGN6a8pbzjQasfghumnqG5UEaUSsJ3mWc1gQU2tb");
 
 const ORA_DECIMALS: u8 = 9;
 // [whitepaper-sync v1.1] INITIAL_SUPPLY synced to Whitepaper v1.1 §5.2 /
@@ -146,21 +146,27 @@ fn dynamic_burn_floor(total_ever_minted: u64) -> u64 {
 
 // [audit fix E-C-2 / E-C-1] Hardcoded protocol admin + treasury accounts.
 // Set to system_program::ID as placeholder; replace with real keys before mainnet deploy.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OFFICIAL_STAKING_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OFFICIAL_PLATFORM: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const OFFICIAL_STAKING_POOL: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const OFFICIAL_PLATFORM: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 // [audit fix R5 H-O-1] / [whitepaper-sync v1.1] §5.7 fee split correction —
 // process_fee now needs the gas-reserve and ops-treasury destinations to match
 // the 40/40/10/10 split shared with content-keys / market / livestream /
 // creator-coin. Placeholders here mirror the other programs; replace with real
 // multisig-controlled ATAs before mainnet deploy.
-pub const OFFICIAL_GAS_RESERVE: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OFFICIAL_OPS_TREASURY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const OFFICIAL_GAS_RESERVE: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const OFFICIAL_OPS_TREASURY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 // [audit fix round2 E2.H-2] Hardcoded growth-reserve destination. Without this
 // binding the authority could mint up to 75M ORA via mau_growth_mint to any
 // arbitrary token account. ⚠️ DO NOT DEPLOY — placeholder; replace with the
 // real multisig-controlled ATA before mainnet deploy.
-pub const OFFICIAL_GROWTH_RESERVE: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const OFFICIAL_GROWTH_RESERVE: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 #[program]
 pub mod aura_ora {

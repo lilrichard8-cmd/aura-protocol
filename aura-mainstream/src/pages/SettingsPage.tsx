@@ -4,6 +4,8 @@ import { Settings, User, Shield, Bell, Wallet, Palette, ChevronRight, Moon, Sun,
 import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
+import { useCoreContract } from '@/hooks/useCoreContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 
 interface SettingSection {
   id: string;
@@ -18,6 +20,15 @@ export default function SettingsPage() {
   const { logout, user, updateProfile } = useAuth();
   const navigate = useNavigate();
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  // 2026-05-19 Tier 2 — on-chain profile sync. When core real-chain is on,
+  // "Save changes" mirrors the local profile to the on-chain UserProfile
+  // account's `profileUri` (CoreModule.updateProfile). Avatar + display
+  // name + bio get encoded as a data: URL so the on-chain blob is
+  // self-contained without requiring an Arweave uploader yet.
+  const core = useCoreContract();
+  const uw = useUnifiedWallet();
+  const [profileChainSaving, setProfileChainSaving] = useState(false);
+  const [profileChainError, setProfileChainError] = useState<string | null>(null);
 
   // ---------- Account section: live edit state ----------
   // Initialised from the current user so the form always reflects what's saved.
@@ -104,7 +115,7 @@ export default function SettingsPage() {
     e.target.value = '';
   };
 
-  const handleSaveAccount = () => {
+  const handleSaveAccount = async () => {
     // Trim & sanity-check before pushing to AuthContext.
     const username = accountDraft.username.replace(/^@/, '').trim();
     const displayName = accountDraft.displayName.trim();
@@ -116,12 +127,51 @@ export default function SettingsPage() {
       alert('Username must be 2–30 characters, letters/numbers/underscore only.');
       return;
     }
+    const trimmedBio = accountDraft.bio.trim().slice(0, 200);
+    // Update local context immediately so UI is responsive.
     updateProfile({
       avatar: accountDraft.avatar,
       displayName,
       username,
-      bio: accountDraft.bio.trim().slice(0, 200),
+      bio: trimmedBio,
     });
+
+    // Best-effort on-chain sync. We don't block the success toast on it:
+    // the local profile is the source-of-truth for now, and the chain
+    // value is a mirror used by other clients to discover this profile.
+    if (core.enabled && core.module && uw.publicKey) {
+      try {
+        setProfileChainSaving(true);
+        setProfileChainError(null);
+        // Build the on-chain blob. Avatar is omitted from the URI when
+        // it's a giant base64 data: URL (would blow the 256-byte profileUri
+        // limit). Off-chain avatars still render via AuthContext locally.
+        const blob = {
+          v: 1,
+          dn: displayName,
+          un: username,
+          bio: trimmedBio,
+        };
+        const json = JSON.stringify(blob);
+        const uri = `data:application/json;base64,${btoa(unescape(encodeURIComponent(json)))}`;
+        // Profile URI on-chain is limited; CoreModule will reject overflows.
+        if (uri.length <= 256) {
+          const res = await core.module.updateProfile({ newProfileUri: uri });
+          if (!res.success) {
+            setProfileChainError(res.error || 'on-chain update failed');
+          }
+        } else {
+          setProfileChainError(
+            'Profile too long for on-chain storage; saved locally only.',
+          );
+        }
+      } catch (e) {
+        setProfileChainError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setProfileChainSaving(false);
+      }
+    }
+
     setAccountSaved(true);
     setTimeout(() => setAccountSaved(false), 1800);
   };
@@ -244,13 +294,19 @@ export default function SettingsPage() {
             <div className="flex items-center gap-3 pt-2">
               <button
                 onClick={handleSaveAccount}
-                className="px-4 py-2 rounded-lg bg-aura text-white text-sm font-medium hover:bg-aura-dark transition-colors"
+                disabled={profileChainSaving}
+                className="px-4 py-2 rounded-lg bg-aura text-white text-sm font-medium hover:bg-aura-dark transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Save changes
+                {profileChainSaving ? 'Saving on-chain…' : 'Save changes'}
               </button>
-              {accountSaved && (
+              {accountSaved && !profileChainSaving && (
                 <span className="inline-flex items-center gap-1 text-sm text-green-500">
-                  <Check className="w-4 h-4" /> Saved
+                  <Check className="w-4 h-4" /> {core.enabled ? 'Saved on-chain' : 'Saved'}
+                </span>
+              )}
+              {profileChainError && (
+                <span className="text-xs text-amber-600 dark:text-amber-400">
+                  On-chain sync skipped: {profileChainError}
                 </span>
               )}
             </div>

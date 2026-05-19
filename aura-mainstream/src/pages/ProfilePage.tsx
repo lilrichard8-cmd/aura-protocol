@@ -33,7 +33,7 @@
  *     (creator coin holders, governance votes, transaction count) — no
  *     hard-coded "12 posts this month" lies.
  */
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import {
   Settings, Share2, Coins, TrendingUp, TrendingDown, Vote,
@@ -43,6 +43,8 @@ import {
 import MintCeremony from '@/components/coin/MintCeremony';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
+import { useCoreContract } from '@/hooks/useCoreContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 import { useI18n } from '@/context/I18nContext';
 import { useToast } from '@/context/ToastContext';
 import { Button } from '@/components/ui/button';
@@ -193,7 +195,39 @@ export default function ProfilePage() {
     return posts.filter(p => keyContentIds.includes(p.id));
   }, [mockChain.ownedKeys, isOwnProfile]);
 
-  const followerCount = user.followers || 0;
+  // 2026-05-19 — chain-backed follower/following/post counts for the
+  // current wallet (own-profile only). Falls back to mock numbers when
+  // the Core flag is off or the profile hasn't been registered yet.
+  const coreOnChain = useCoreContract();
+  const unifiedWallet = useUnifiedWallet();
+  const [chainCounts, setChainCounts] = useState<{
+    followerCount: number;
+    followingCount: number;
+    postCount: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!isOwnProfile) return;
+    if (!coreOnChain.enabled || !coreOnChain.module) return;
+    if (!unifiedWallet.publicKey) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await coreOnChain.module!.fetchUserProfile(unifiedWallet.publicKey!);
+        if (!cancelled && p) {
+          setChainCounts({
+            followerCount: p.followerCount,
+            followingCount: p.followingCount,
+            postCount: p.postCount,
+          });
+        }
+      } catch { /* leave null */ }
+    })();
+    return () => { cancelled = true; };
+  }, [isOwnProfile, coreOnChain.enabled, coreOnChain.module, unifiedWallet.publicKey]);
+
+  const followerCount = (isOwnProfile && chainCounts)
+    ? chainCounts.followerCount
+    : (user.followers || 0);
   const canMint = followerCount >= 100;
 
   const defaultMintSymbol = (user.username || 'MYCOIN')
@@ -209,9 +243,30 @@ export default function ProfilePage() {
   };
 
   const isFollowing = mockChain.followingIds.includes(user.id);
-  const handleFollowToggle = () => {
+  const handleFollowToggle = async () => {
     if (isFollowing) mockChain.unfollowUser(user.id);
     else mockChain.followUser(user.id);
+    // 2026-05-19 — mirror to the chain when the target's id is a
+    // base58 public key (≥ 32 chars, base58 alphabet). Best-effort
+    // — demo users from mock data have short ids and are skipped.
+    if (
+      coreOnChain.enabled &&
+      coreOnChain.module &&
+      unifiedWallet.connected &&
+      /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(user.id)
+    ) {
+      try {
+        const target = new (await import('@solana/web3.js')).PublicKey(user.id);
+        const res = isFollowing
+          ? await coreOnChain.module.unfollowUser(target)
+          : await coreOnChain.module.followUser(target);
+        if (!res.success) {
+          console.warn('[ProfilePage] on-chain follow failed:', res.error);
+        }
+      } catch (e: any) {
+        console.warn('[ProfilePage] follow dispatch failed:', e?.message);
+      }
+    }
   };
 
   // Tabs config — each shows a count badge (real count) so users get
@@ -229,7 +284,9 @@ export default function ProfilePage() {
   const stakedOra = mockChain.stakedOra ?? 0;
   const myVotesCount = Object.keys(mockChain.myVotes || {}).length;
   const txCount = (mockChain.transactions || []).length;
-  const followingCount = (mockChain.followingIds || []).length;
+  const followingCount = (isOwnProfile && chainCounts)
+    ? chainCounts.followingCount
+    : (mockChain.followingIds || []).length;
   const reputationScore = mockChain.reputationScore ?? 0;
   const reputationTier = mockChain.reputationTier ?? 'Bronze';
 

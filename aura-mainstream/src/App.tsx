@@ -17,6 +17,8 @@ import { SideNavProvider, useSideNav } from '@/context/SideNavContext';
 import { ToastProvider } from '@/context/ToastContext';
 import { BuyOraProvider } from '@/context/BuyOraContext';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { useAutoFundLocalnet } from '@/hooks/useAutoFundLocalnet';
+import { usePrivyAutoCreateWallet } from '@/hooks/usePrivyAutoCreateWallet';
 import Header from '@/components/layout/Header';
 import BottomNav from '@/components/layout/BottomNav';
 import SideNav from '@/components/layout/SideNav';
@@ -87,6 +89,14 @@ function Layout({ children }: { children: React.ReactNode }) {
   // `md:hidden` rule shipped them the mobile UI, which both confused users
   // ("this looks like the phone version") and hid the DM entry that only
   // lives in BottomNav. iPad portrait → mobile, iPad landscape → desktop.
+  //
+  // 2026-05-20 — wrap content in PageErrorBoundary so a runtime error inside
+  // any page does NOT crash the entire SPA (route + sidenav + header stay
+  // mounted, user can navigate away). Previously only 3 routes had explicit
+  // boundaries; baking it into Layout covers all 32 protected routes.
+  // The `key` prop forces the boundary to reset its error state whenever
+  // the route changes — otherwise a crash on /wallet would persist as a
+  // sticky error screen even after navigating to /feed.
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="hidden lg:block">
@@ -98,7 +108,9 @@ function Layout({ children }: { children: React.ReactNode }) {
       <div className={`transition-all duration-300 ${
         collapsed ? 'lg:ml-16' : 'lg:ml-64'
       }`}>
-        {children}
+        <PageErrorBoundary key={location.pathname}>
+          {children}
+        </PageErrorBoundary>
       </div>
 
       <InstallPWA />
@@ -113,20 +125,27 @@ function Layout({ children }: { children: React.ReactNode }) {
 
 function AppRoutes() {
   const { isAuthenticated } = useAuth();
+  // Privy: if user just logged in via email but no embedded Solana wallet
+  // exists yet, force-create one. (createOnLogin race-condition workaround.)
+  usePrivyAutoCreateWallet();
+  // Localnet UX nicety: auto-airdrop SOL to Privy embedded wallets on first
+  // sight, so email-only test users can immediately use Bounty V2 etc.
+  // No-ops on devnet/mainnet (see useAutoFundLocalnet for guard).
+  useAutoFundLocalnet();
 
   return (
     <Routes>
       {/* Welcome & Protocol Pages - Public */}
       <Route path="/" element={isAuthenticated ? <Navigate to="/feed" replace /> : <Navigate to="/auth" replace />} />
-      <Route path="/protocol" element={<ProtocolPage />} />
+      <Route path="/protocol" element={<PageErrorBoundary><ProtocolPage /></PageErrorBoundary>} />
       
       {/* Auth */}
-      <Route path="/auth" element={isAuthenticated ? <Navigate to="/feed" replace /> : <AuthPage />} />
+      <Route path="/auth" element={isAuthenticated ? <Navigate to="/feed" replace /> : <PageErrorBoundary><AuthPage /></PageErrorBoundary>} />
       {/* Onboarding is intentionally NOT gated by isAuthenticated: when AuthPage
           calls navigate('/onboarding') right after a wallet connect, React
           has not yet flushed the new user state, so a guard would bounce the
           user back to /auth. OnboardingPage validates the user itself. */}
-      <Route path="/onboarding" element={<OnboardingPage />} />
+      <Route path="/onboarding" element={<PageErrorBoundary><OnboardingPage /></PageErrorBoundary>} />
       
       {/* Main App Routes - Protected */}
       <Route path="/feed" element={<RequireAuth><Layout><HomePage /></Layout></RequireAuth>} />
@@ -142,6 +161,11 @@ function AppRoutes() {
       <Route path="/remix" element={<RequireAuth><Layout><RemixPage /></Layout></RequireAuth>} />
       <Route path="/remix/:id" element={<RequireAuth><Layout><RemixDetailPage /></Layout></RequireAuth>} />
       <Route path="/create" element={<RequireAuth><Layout><CreatePage /></Layout></RequireAuth>} />
+      {/* 2026-05-19 — `/studio/create` is a common typo / external deep link.
+         Redirect to the canonical `/create` flow so the page doesn't render
+         empty (router NoMatch → blank Outlet → 0-byte root). Same target,
+         same query string, no behaviour change for the user. */}
+      <Route path="/studio/create" element={<Navigate to="/create" replace />} />
       {/* /studio is now the launchpad hub for all create / propose / launch actions.
           /create remains the dedicated content-publishing flow (Photo / Video / Text / Audio / Live). */}
       <Route path="/studio" element={<RequireAuth><Layout><StudioHubPage /></Layout></RequireAuth>} />

@@ -1,6 +1,8 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import type { WalletName } from '@solana/wallet-adapter-base';
+import { usePrivy } from '@privy-io/react-auth';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 import { currentUser } from '@/data/mock';
 import { useMockChain, JUDGE_DEMO_STATE, NEW_ACCOUNT_STARTER_STATE } from '@/context/MockChainContext';
 import type { User } from '@/types';
@@ -70,10 +72,68 @@ export class WalletConnectError extends Error {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const mockChain = useMockChain();
   const solWallet = useWallet();
+  const { authenticated: privyAuthed, user: privyUser, ready: privyReady, logout: privyLogout } = usePrivy();
+  const unifiedWallet = useUnifiedWallet();
   const [user, setUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('aura_auth');
     return saved ? JSON.parse(saved) : null;
   });
+
+  // ── Privy auto-auth bridge ──
+  // When a user signs in via Privy email, automatically create a local
+  // `User` record so `isAuthenticated` flips true and they bypass the
+  // username/password mock login. The username is derived from email or
+  // wallet truncation; the canonical id is the Privy DID (`user.id`).
+  // Subsequent app code can read `user.id`, `user.email`, `user.walletAddress`
+  // and not care that it came from Privy.
+  useEffect(() => {
+    if (!privyReady) return;
+    if (!privyAuthed || !privyUser) return;
+    // If we already have a Privy-shaped user persisted, don't overwrite
+    // (preserves customizations from /onboarding).
+    if (user && user.id === privyUser.id) {
+      // Refresh walletAddress if it just synced (linkedAccounts arrived later).
+      const addr = unifiedWallet.publicKey?.toBase58() ?? null;
+      if (addr && user.walletAddress !== addr) {
+        const next = { ...user, walletAddress: addr };
+        localStorage.setItem('aura_auth', JSON.stringify(next));
+        setUser(next);
+      }
+      return;
+    }
+    // Avoid clobbering an unrelated mock-user (judge, legacy demo) — only
+    // bridge when no user yet, or when the existing user is clearly
+    // Privy-shaped (`did:privy:...`) or wallet-shaped (`wallet:...`).
+    if (user && !user.id?.startsWith('did:privy') && !user.id?.startsWith('wallet:')) {
+      // existing mock user (judge / legacy demo) — leave alone
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const emailAcc: any = privyUser.email ?? (privyUser as any).linkedAccounts?.find((a: any) => a.type === 'email');
+    const emailAddr: string | undefined = typeof emailAcc === 'string'
+      ? emailAcc
+      : (emailAcc?.address as string | undefined);
+    const addr = unifiedWallet.publicKey?.toBase58() ?? null;
+    const handleBase = emailAddr ? emailAddr.split('@')[0] : (addr ? `${addr.slice(0, 4)}...${addr.slice(-4)}` : 'user');
+    const username = handleBase.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'user';
+    const newUser: User = {
+      id: privyUser.id,
+      username,
+      displayName: username,
+      avatar: addr ? `https://api.dicebear.com/7.x/identicon/svg?seed=${addr}` : '',
+      bio: '',
+      followers: 0,
+      following: 0,
+      isVerified: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...(emailAddr ? ({ email: emailAddr } as any) : {}),
+      walletAddress: addr ?? undefined,
+    };
+    localStorage.setItem('aura_auth', JSON.stringify(newUser));
+    setUser(newUser);
+    // eslint-disable-next-line no-console
+    console.info('[AuthContext] Privy user bridged to AuthContext:', { id: newUser.id, email: emailAddr, wallet: addr });
+  }, [privyReady, privyAuthed, privyUser, unifiedWallet.publicKey, user]);
 
   const login = useCallback(async (email: string, password: string) => {
     await new Promise(r => setTimeout(r, 800));
@@ -339,6 +399,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // Stable identity for the Privy-bridged path — used by isAuthenticated
+  // so that even before useEffect bridges into local state, the app
+  // doesn't bounce the user to /auth.
+  const effectiveAuthenticated = useMemo(() => {
+    if (user) return true;
+    if (privyReady && privyAuthed) return true;
+    return false;
+  }, [user, privyReady, privyAuthed]);
+
   const logout = useCallback(() => {
     localStorage.removeItem('aura_auth');
     mockChain.disconnectWallet();
@@ -365,20 +434,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearSession();
     // Best-effort wallet disconnect (don't await — UX should not block on this)
     try { void solWallet.disconnect?.(); } catch {}
+    // Sign out of Privy too — otherwise the bridge effect re-auths immediately.
+    try { void privyLogout?.(); } catch {}
     setUser(null);
-  }, [mockChain, solWallet]);
+  }, [mockChain, solWallet, privyLogout]);
+
+  // 2026-05-19 H-1 — memoize the context value object so consumers don't see
+  // a brand-new reference on every render. Without this, every render of
+  // AuthProvider (driven by Privy/MockChain/wallet-adapter state churn) sent
+  // a new object through `value=`, which made `useAuth()` re-fire all `[me]`
+  // / `[user]` memos downstream. The walletAddress string is also derived
+  // through three nullable sources, so we collapse it to a stable string
+  // first and key the memo on it.
+  const walletAddress = useMemo(() => (
+    unifiedWallet.publicKey?.toBase58()
+    ?? solWallet.publicKey?.toBase58()
+    ?? (mockChain.connected ? mockChain.publicKey : null)
+  ), [unifiedWallet.publicKey, solWallet.publicKey, mockChain.connected, mockChain.publicKey]);
+
+  const value = useMemo<AuthContextType>(() => ({
+    updateProfile,
+    user,
+    isAuthenticated: effectiveAuthenticated,
+    login,
+    register,
+    connectWallet,
+    logout,
+    walletAddress,
+  }), [updateProfile, user, effectiveAuthenticated, login, register, connectWallet, logout, walletAddress]);
 
   return (
-    <AuthContext.Provider value={{
-      updateProfile,
-      user,
-      isAuthenticated: !!user,
-      login,
-      register,
-      connectWallet,
-      logout,
-      walletAddress: solWallet.publicKey?.toBase58() ?? (mockChain.connected ? mockChain.publicKey : null),
-    }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

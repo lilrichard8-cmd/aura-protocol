@@ -13,9 +13,13 @@ import { users, iris, posts as allPosts } from '@/data/mock';
 import { useUserPosts } from '@/hooks/useUserPosts';
 import { useAuth } from '@/context/AuthContext';
 import { useI18n } from '@/context/I18nContext';
+import { useFractionalizeContract } from '@/hooks/useFractionalizeContract';
+import { Link2 } from 'lucide-react';
 import { useToast } from '@/context/ToastContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useBuyOra } from '@/context/BuyOraContext';
+import { useMarketContract } from '@/hooks/useMarketContract';
+import { useContentKeysContract } from '@/hooks/useContentKeysContract';
 
 interface MarketItem {
   id: string;
@@ -62,6 +66,11 @@ export default function MarketplacePage() {
   const mockChain = useMockChain();
   const buyOra = useBuyOra();
   const { showToast } = useToast();
+  // Optional real-chain bridges. Both are gated behind their own VITE_*
+  // flags and silently no-op when disabled, so the existing mockChain
+  // flows remain the default until devnet pools are provisioned.
+  const marketContract = useMarketContract();
+  const contentKeysContract = useContentKeysContract();
   // Active tab lives in the URL (`?tab=nft`) so back-navigation from detail
   // pages restores the exact tab the user was on. "coins" stays parameter-free
   // for clean URLs and backwards compatibility with old links to /marketplace.
@@ -738,6 +747,7 @@ export default function MarketplacePage() {
               navigate={navigate}
               fromPath={fromPath}
               setKeyPurchaseAmount={setKeyPurchaseAmount}
+              contentKeysContract={contentKeysContract}
             />
           </TabsContent>
 
@@ -763,6 +773,7 @@ export default function MarketplacePage() {
               title="Fractional Ownership"
               description="Co-own a high-value NFT in fractional shares. Buy a fraction, vote on sales, earn yield when the underlying piece appreciates. Lower the floor to participate in works that would otherwise be out of reach."
             />
+            <FractionalizeOnChainBanner />
             <FractionalizedGrid />
           </TabsContent>
         </Tabs>
@@ -794,11 +805,12 @@ export default function MarketplacePage() {
  * showing the user's own holdings. Owned keys live in the wallet/profile.
  */
 function ContentKeysTab({
-  navigate, fromPath, setKeyPurchaseAmount,
+  navigate, fromPath, setKeyPurchaseAmount, contentKeysContract,
 }: {
   navigate: ReturnType<typeof useNavigate>;
   fromPath: string;
   setKeyPurchaseAmount: (n: number) => void;
+  contentKeysContract: ReturnType<typeof useContentKeysContract>;
 }) {
   const mockChain = useMockChain();
   const { showToast } = useToast();
@@ -818,6 +830,25 @@ function ContentKeysTab({
 
   const buyPrimary = async (postId: string, price: number) => {
     try {
+      // Real-chain path — requires the post to carry an on-chain content
+      // descriptor (creator pubkey + content_id). Mock-seeded posts don't,
+      // so we fall through to mockChain in that case. This keeps the flag
+      // opt-in per-listing rather than per-page.
+      if (contentKeysContract.enabled) {
+        const onChain = (mockChain as any).contentKeyOnChain?.[postId] as
+          | { creator: string; contentId: string | number }
+          | undefined;
+        if (onChain?.creator && onChain.contentId !== undefined) {
+          const res = await contentKeysContract.buyKey({
+            creator: onChain.creator,
+            contentId: BigInt(onChain.contentId),
+          });
+          if (!res.success) throw new Error(res.error || 'on-chain buyKey failed');
+          setKeyPurchaseAmount(price);
+          showToast('success', 'Key purchased on-chain', `tx: ${res.signature.slice(0, 8)}…`);
+          return;
+        }
+      }
       await mockChain.buyContentKey(postId, price);
       setKeyPurchaseAmount(price);
     } catch (e: any) {
@@ -908,8 +939,29 @@ function ContentKeysTab({
                     <Button
                       size="sm"
                       onClick={async () => {
-                        try { await mockChain.buyListedKey(key.keyId); setKeyPurchaseAmount(key.askPrice); }
-                        catch (e: any) { showToast('error', e?.message || 'Purchase failed'); }
+                        try {
+                          // Try real-chain secondary buy when the listing has an
+                          // on-chain descriptor. Falls through to mockChain
+                          // otherwise (today's default for seeded listings).
+                          if (contentKeysContract.enabled) {
+                            const onChain = (mockChain as any).listedKeyOnChain?.[key.keyId] as
+                              | { creator: string; contentId: string | number; keySerial: string | number }
+                              | undefined;
+                            if (onChain?.creator && onChain.contentId !== undefined && onChain.keySerial !== undefined) {
+                              const res = await contentKeysContract.buyListedKey({
+                                creator: onChain.creator,
+                                contentId: BigInt(onChain.contentId),
+                                keySerial: BigInt(onChain.keySerial),
+                              });
+                              if (!res.success) throw new Error(res.error || 'on-chain buyListedKey failed');
+                              setKeyPurchaseAmount(key.askPrice);
+                              showToast('success', 'Listed key purchased on-chain', `tx: ${res.signature.slice(0, 8)}…`);
+                              return;
+                            }
+                          }
+                          await mockChain.buyListedKey(key.keyId);
+                          setKeyPurchaseAmount(key.askPrice);
+                        } catch (e: any) { showToast('error', e?.message || 'Purchase failed'); }
                       }}
                       className="w-full bg-gradient-to-r from-[#F59E0B] to-orange-500 text-white"
                     >
@@ -1043,3 +1095,26 @@ function PrimaryKeyCard({
 
 // TabIntroCard now lives in src/components/common/TabIntroCard.tsx so the
 // Curation page — and any future tabbed surface — can reuse the same shape.
+// ────────────────────────────────────────────────────────────────────────
+// FractionalizeOnChainBanner
+// 2026-05-19 — Tier-2 creator-loop wire-up. Surfaces the chain status of
+// the fractionalize program so the user knows what's real. Read-only.
+// ────────────────────────────────────────────────────────────────────────
+function FractionalizeOnChainBanner() {
+  const chain = useFractionalizeContract();
+  if (!chain.enabled) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-200 px-3 py-2 text-xs">
+      <Link2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+      <div className="flex-1">
+        <span className="font-semibold">Fractionalize program online.</span>{' '}
+        Detail-page trades dispatch <code className="bg-emerald-500/10 px-1 rounded">buy_fragment</code>{' '}
+        / <code className="bg-emerald-500/10 px-1 rounded">sell_fragment</code>{' '}
+        / <code className="bg-emerald-500/10 px-1 rounded">claim_revenue</code> to{' '}
+        <code className="font-mono">{chain.module?.['programId']?.toBase58?.().slice(0, 12) ?? '…'}…</code>{' '}
+        whenever the fractional NFT carries a real mint. To seed a fresh on-chain fractional NFT, run{' '}
+        <code className="bg-emerald-500/10 px-1 rounded">scripts/smoke-fractionalize.mjs</code>.
+      </div>
+    </div>
+  );
+}

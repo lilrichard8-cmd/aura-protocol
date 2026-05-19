@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("Ho5Ent8c2D6eLAZuyW16iUekqMmpfqzoTspXbMQqa9JN");
+declare_id!("4VTNh4tcTuF5wDYhP8qbvf5hdUV4xUm7KJVJd9oSweEE");
 
 #[program]
 pub mod aura_core {

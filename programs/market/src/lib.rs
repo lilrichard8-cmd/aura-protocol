@@ -26,7 +26,7 @@ pub use bounty_v2::*;
 pub use bounty_v2_ix::*;
 pub use royalty::*;
 
-declare_id!("5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV");
+declare_id!("9YgDaCgqqHhztHEr8TDBmX3ffrdHw9nMXt2tZXjBA2sc");
 
 // ╔══════════════════════════════════════════════════════════════════════╗
 // ║  ⚠️ ⚠️ ⚠️  DO NOT DEPLOY TO MAINNET  ⚠️ ⚠️ ⚠️                              ║
@@ -46,26 +46,35 @@ declare_id!("5BTekjKRiY8pXqEr7eQsqhRFynN27CxfYnh1d5q27cLV");
 
 /// [audit fix C-6/C-20] Hardcoded protocol fee pools (ORA-denominated).
 /// ⚠️ DO NOT DEPLOY — placeholder = system program ID; replace with real protocol PDAs pre-mainnet.
-pub const STAKING_REWARDS_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const GAS_RESERVE_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OPS_TREASURY_POOL: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: 9byFYXdRziBe6huCRCsExz65eJMJRxkLPNReTYPzCiHS
+pub const STAKING_REWARDS_POOL: Pubkey = Pubkey::new_from_array([127, 210, 216, 137, 107, 161, 33, 182, 172, 186, 167, 117, 190, 40, 215, 32, 84, 56, 69, 15, 197, 164, 130, 140, 59, 246, 11, 42, 77, 87, 94, 69]);
+// [local-deploy 2026-05-19] real address on localnet: G9faGRWp35cDnGZdE38zwTisErASpYGoYcCKDvY3CPEE
+pub const GAS_RESERVE_POOL: Pubkey = Pubkey::new_from_array([225, 23, 144, 204, 122, 29, 73, 91, 161, 241, 10, 117, 27, 233, 253, 109, 104, 15, 163, 59, 61, 24, 233, 119, 245, 67, 128, 29, 70, 173, 249, 143]);
+// [local-deploy 2026-05-19] real address on localnet: FcpiWgjWuA39CMZfahxhDSMUGUavB4kVHjuovGvAxr1f
+pub const OPS_TREASURY_POOL: Pubkey = Pubkey::new_from_array([217, 48, 229, 202, 178, 131, 49, 202, 84, 203, 0, 200, 144, 206, 29, 150, 143, 191, 101, 210, 58, 17, 161, 63, 138, 132, 39, 227, 12, 173, 122, 146]);
 
 /// [Bounty V2 audit fix C-2] Canonical token mints.
 /// ⚠️ DO NOT DEPLOY — placeholders. Replace with real ORA/USDC mints pre-mainnet.
-pub const ORA_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const USDC_MINT: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: AE2saLnjj8u9RGQyftYw4wLX5wR2HbJ3byb1t97CdF8s
+pub const ORA_MINT: Pubkey = Pubkey::new_from_array([137, 15, 217, 121, 122, 4, 82, 92, 100, 203, 47, 28, 205, 45, 150, 226, 133, 111, 232, 149, 62, 3, 156, 144, 35, 103, 3, 130, 149, 120, 102, 80]);
+// [local-deploy 2026-05-19] real address on localnet: 7zLE5iNcfw6xAR7BxhU1yZMk6Sz7TYQir8U1xUe72Jp1
+pub const USDC_MINT: Pubkey = Pubkey::new_from_array([103, 213, 247, 79, 209, 140, 32, 112, 73, 146, 150, 30, 157, 32, 182, 221, 206, 78, 239, 59, 111, 37, 236, 101, 201, 224, 81, 36, 225, 148, 14, 242]);
 
 /// [Bounty V2 audit fix C-4] Program admin allowed to initialise / rotate
 /// the OfficialBountyAuthority. Prevents front-run init attacks.
 /// ⚠️ DO NOT DEPLOY — placeholder. Replace with real multisig pubkey pre-mainnet.
-pub const PROGRAM_ADMIN: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const PROGRAM_ADMIN: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [Bounty V2 audit fix H-2] USDC-denominated protocol fee pools.
 /// Separate from ORA pools because token accounts hold one mint each.
 /// ⚠️ DO NOT DEPLOY — placeholders. Replace with real USDC treasury accounts.
-pub const STAKING_REWARDS_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const GAS_RESERVE_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
-pub const OPS_TREASURY_POOL_USDC: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: CUaHXgXyr7TCCYE2svaLm1LMEUGH6LYjBXm6nwrAKY5q
+pub const STAKING_REWARDS_POOL_USDC: Pubkey = Pubkey::new_from_array([170, 128, 223, 156, 178, 145, 31, 107, 68, 126, 45, 193, 227, 174, 161, 47, 130, 11, 147, 107, 231, 246, 33, 33, 208, 98, 252, 41, 214, 235, 183, 116]);
+// [local-deploy 2026-05-19] real address on localnet: 8fQer3FEnA9uBSb6PnEMn5n1VjNq5zyqszdZyPSnoq4s
+pub const GAS_RESERVE_POOL_USDC: Pubkey = Pubkey::new_from_array([113, 216, 159, 138, 109, 91, 51, 188, 114, 170, 98, 203, 191, 245, 22, 174, 135, 166, 113, 241, 93, 122, 194, 147, 145, 206, 82, 227, 73, 239, 132, 192]);
+// [local-deploy 2026-05-19] real address on localnet: FrhNsvGjLd3Z8PAmkjLG8AJonrKRkyhY5U2qcvaJ21ad
+pub const OPS_TREASURY_POOL_USDC: Pubkey = Pubkey::new_from_array([220, 190, 187, 52, 49, 46, 221, 218, 90, 91, 251, 180, 89, 209, 68, 189, 234, 150, 206, 28, 29, 215, 196, 136, 59, 105, 83, 250, 69, 168, 170, 54]);
 
 /// [audit fix M-C4] Runtime guard that aborts revenue-generating instructions
 /// when the placeholder protocol-pool constants haven't been replaced with real

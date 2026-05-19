@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg");
+declare_id!("EoTfniRTgWhRD58bjUBSLk1rGR98tzfGZdVZuJXh8es8");
 
 // ╔═════════════════════════════════════════════════════════════════════╗
 // ║  ⚠️ ⚠️ ⚠️  DO NOT DEPLOY TO MAINNET  ⚠️ ⚠️ ⚠️                            ║
@@ -25,7 +25,8 @@ declare_id!("GoBjYZJngPdQe2wEgzu4bE74PPDFa8XGKqVadFuM8pEg");
 ///
 /// ⚠️ DO NOT DEPLOY — placeholder = system_program::ID. Replace with the
 /// real AURA reputation oracle multisig pubkey before mainnet.
-pub const MINT_AUTHORITY: Pubkey = anchor_lang::solana_program::system_program::ID;
+// [local-deploy 2026-05-19] real address on localnet: DppCZV1QDh6D4hoUJvpQCjiZ5KCjV4YTokUGsu7m4bxP
+pub const MINT_AUTHORITY: Pubkey = Pubkey::new_from_array([190, 139, 232, 217, 216, 167, 202, 133, 100, 57, 237, 31, 194, 128, 82, 13, 164, 131, 226, 139, 206, 103, 215, 221, 251, 39, 85, 246, 98, 109, 149, 76]);
 
 /// [audit fix round2 R2-R-H1] Runtime guard that aborts `update_reputation`
 /// with a clear `PlaceholderMintAuthority` error when the constant above is

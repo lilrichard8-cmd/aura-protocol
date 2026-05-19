@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { iris, users, posts as seedPosts } from '@/data/mock';
 
 // --- Types ---
@@ -3519,7 +3519,19 @@ export function MockChainProvider({ children }: { children: ReactNode }) {
     setState(prev => ({ ...prev, rpcUrl }));
   }, []);
 
-  const value: MockChainState = {
+  // 2026-05-19 H-1 — memoize the entire context value. The provider object
+  // contains 100+ fields and used to be re-created on every render. Every
+  // re-render of MockChainProvider (driven by state changes, parent renders,
+  // or sibling context churn) handed a brand-new object to every
+  // `useMockChain()` consumer, invalidating downstream `[mockChain]` memos
+  // and effects. Keying on `state` is correct because every mutator goes
+  // through `setState(prev => ...)` and produces a new state object
+  // identity — callbacks are already stabilised by `useCallback`. The
+  // `reloadState` arrow is intentionally created once via `useCallback`
+  // below to avoid breaking the memo.
+  const reloadState = useCallback(() => setState(load()), []);
+
+  const value = useMemo<MockChainState>(() => ({
     mode: state.mode,
     rpcUrl: state.rpcUrl,
     connected: state.connected,
@@ -3656,8 +3668,30 @@ export function MockChainProvider({ children }: { children: ReactNode }) {
     submitBountyWork,
     awardBounty,
     adBids: state.adBids,
-    reloadState: () => setState(load()),
-  };
+    reloadState,
+  }), [
+    state,
+    connectWallet, disconnectWallet, publishContent, mintCreatorCoin,
+    buyCreatorCoin, sellCreatorCoin, simulateExternalCoinBuy,
+    simulateExternalCoinSellToMe, redeemCoinBenefit, initiateRedemption,
+    markRedemptionDelivered, confirmRedemptionReceipt, disputeRedemption,
+    giftCreatorCoin, markRedemptionNotificationsRead,
+    markInAppNotificationsRead, markInAppNotificationRead,
+    addPostComment, reserveSellOrder, releaseSellOrder, fillExternalSellOrder,
+    unlockNextVestingBatch, setCreatorCoinBatchPrice, setCreatorCoinTgePrice,
+    setCreatorCoinRealizedBatchPrice, markCoinNotificationsRead, curateContent,
+    buyContentKey, listContentKey, buyListedKey, boostContent, pinContent,
+    claimVested, setLicense, payToEmbed, payToRemix, createRemix,
+    followUser, unfollowUser, stakeOra, unstakeOra, claimStakingReward,
+    setNetwork, stakeOraWithTier, unstakeFromTier, sendCreatorCoin,
+    performCuration, redeemCreatorCoinTier, sendOra, buyOra, acquireNft,
+    voteOnProposal, createProposal, submitElectionApplication,
+    withdrawElectionApplication, setProfileBannerUrl, toggleLikePost,
+    simulateAuthorReplyToComment, notifyInboundFollow, tipCreator,
+    subscribeToCreator, purchasePPV, setMode, setRpcUrl, buyFragment,
+    sellFragment, claimFragmentRevenue, fractionalizeContent, createBounty,
+    submitBountyWork, awardBounty, reloadState,
+  ]);
 
   return <MockChainContext.Provider value={value}>{children}</MockChainContext.Provider>;
 }

@@ -26,6 +26,7 @@ import { useToast } from '@/context/ToastContext';
 import { useUserPosts } from '@/hooks/useUserPosts';
 import type { Post } from '@/types';
 import { useOraGuard } from '@/hooks/useOraGuard';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
 import {
   Sparkles, ImageIcon, Music, Video, FileText, Radio, Lock, Layers,
   Coins, Trophy, Vote, Award, Package, Inbox, FileEdit,
@@ -56,6 +57,12 @@ export default function StudioHubPage() {
   const { user } = useAuth();
   const { showToast } = useToast();
   const oraGuard = useOraGuard();
+  // 2026-05-19 Tier 2 — real wallet pubkey is used to broaden the
+  // "creator === me" match below so bounties / fnfts / proposals created
+  // by the actual on-chain Privy wallet (rather than the mock string)
+  // appear in this Studio.
+  const uw = useUnifiedWallet();
+  const realPubkey = uw.publicKey?.toBase58() ?? null;
   const [searchParams, setSearchParams] = useSearchParams();
 
   // ── Tab state syncs with ?tab=... so deep links and refresh stay put.
@@ -80,21 +87,27 @@ export default function StudioHubPage() {
   const myPosts = useUserPosts(user as any);
   const myProposalCount = useMemo(
     () => mockChain.proposals.filter(p =>
-      p.proposer === mockChain.walletAddress || p.proposer === 'You'
+      p.proposer === mockChain.walletAddress
+      || p.proposer === 'You'
+      || (realPubkey ? p.proposer === realPubkey : false)
     ).length,
-    [mockChain.proposals, mockChain.walletAddress],
+    [mockChain.proposals, mockChain.walletAddress, realPubkey],
   );
   const myBounties = useMemo(
     () => mockChain.bounties.filter(b =>
-      b.creator === 'You' || (mockChain.publicKey && b.creator.startsWith(mockChain.publicKey.slice(0, 6)))
+      b.creator === 'You'
+      || (mockChain.publicKey && b.creator.startsWith(mockChain.publicKey.slice(0, 6)))
+      || (realPubkey ? b.creator.startsWith(realPubkey.slice(0, 6)) || b.creator === realPubkey : false)
     ),
-    [mockChain.bounties, mockChain.publicKey],
+    [mockChain.bounties, mockChain.publicKey, realPubkey],
   );
   const myFnfts = useMemo(
     () => mockChain.fractionalizedNfts.filter(f =>
-      f.creator === 'You' || f.creator === mockChain.walletAddress
+      f.creator === 'You'
+      || f.creator === mockChain.walletAddress
+      || (realPubkey ? f.creator === realPubkey : false)
     ),
-    [mockChain.fractionalizedNfts, mockChain.walletAddress],
+    [mockChain.fractionalizedNfts, mockChain.walletAddress, realPubkey],
   );
   const incomingRedemptions = useMemo(
     () => mockChain.redemptions.filter(r => r.perspective === 'me_as_creator'),

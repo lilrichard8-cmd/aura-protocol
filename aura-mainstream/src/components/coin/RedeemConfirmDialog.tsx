@@ -1,6 +1,6 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Lock, Truck, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { Lock, Truck, CheckCircle2, ShieldCheck, Link2 } from 'lucide-react';
 import { useState } from 'react';
 
 interface Benefit {
@@ -16,7 +16,21 @@ interface Props {
   benefit: Benefit | null;
   symbol: string;        // e.g. "$IRIS"
   creatorName: string;
+  /**
+   * Confirmation handler. Should:
+   *   1. (Chain mode) call the on-chain initiateRedemption if `chainMode`
+   *      is true and chain context is wired by parent.
+   *   2. Update local mock-chain bookkeeping for fallback.
+   * Failures should throw — the dialog will surface the message.
+   */
   onConfirm: () => Promise<void>;
+  /**
+   * If true, the dialog shows an extra banner telling the user the
+   * redemption hits the on-chain Creator-Coin program. Pages should set
+   * this when `useCreatorCoinRedemption().enabled` is true and the
+   * coin's on-chain mint + creator pubkey are known.
+   */
+  chainMode?: boolean;
 }
 
 export default function RedeemConfirmDialog({ open, onOpenChange, benefit, symbol, creatorName, onConfirm }: Props) {
@@ -95,6 +109,18 @@ export default function RedeemConfirmDialog({ open, onOpenChange, benefit, symbo
             <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <span>Escrow is enforced on-chain. Your coins are safe until you confirm — or you can dispute the redemption.</span>
           </div>
+
+          {/* Real-chain banner — only when parent has wired the SDK call. */}
+          {chainMode && (
+            <div className="flex items-start gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 px-3 py-2 text-xs">
+              <Link2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>
+                <span className="font-semibold">Real chain.</span> Confirming will sign an
+                <code className="mx-1 px-1 rounded bg-emerald-500/10">initiate_redemption</code>
+                instruction on the Solana validator and lock your CC into the program-owned escrow.
+              </span>
+            </div>
+          )}
         </div>
 
         <DialogFooter>

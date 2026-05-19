@@ -6,6 +6,21 @@ import { Gift, Search } from 'lucide-react';
 import { users, iris } from '@/data/mock';
 import { useMockChain } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
+import { useCreatorCoinContract } from '@/hooks/useCreatorCoinContract';
+import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
+import { PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
+
+/**
+ * Detect a plausible base58 Solana pubkey (43–44 chars, no 0/O/I/l). Used so
+ * users can paste a wallet address for an on-chain gift; usernames and any
+ * other string fall through to the mock SPL transfer.
+ */
+function tryParsePubkey(s: string): PublicKey | null {
+  const t = s.trim();
+  if (!/^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(t)) return null;
+  try { return new PublicKey(t); } catch { return null; }
+}
 
 interface Props {
   open: boolean;
@@ -26,6 +41,12 @@ const FALLBACK_AVATAR = 'https://images.unsplash.com/photo-1472099645785-5658abf
 export default function GiftCoinDialog({ open, onOpenChange, symbol, available }: Props) {
   const mockChain = useMockChain();
   const { showToast } = useToast();
+  // Real-chain bridge — VITE_CREATOR_COIN_REAL_CHAIN=true. Mock users have no
+  // wallet addresses, so on-chain gifts only fire when the recipient field
+  // contains a base58 pubkey. Username/mock recipients keep their existing
+  // off-chain semantics so the demo flow never breaks.
+  const onChain = useCreatorCoinContract();
+  const uw = useUnifiedWallet();
   const [query, setQuery] = useState('');
   const [picked, setPicked] = useState<Recipient | null>(null);
   const [amount, setAmount] = useState('');
@@ -84,8 +105,46 @@ export default function GiftCoinDialog({ open, onOpenChange, symbol, available }
     }
     setLoading(true);
     try {
+      // Real-chain path: only fires when (a) flag is on, (b) we have our
+      // wallet, (c) recipient field is a real pubkey (paste mode), (d) the
+      // sender's creator coin exists on-chain. Otherwise we fall through to
+      // mockChain so usernames / demo recipients keep working.
+      const recipientPk = tryParsePubkey(query) ?? null;
+      let onChainSig: string | null = null;
+      if (onChain.enabled && onChain.module && uw.publicKey && recipientPk) {
+        try {
+          const sender = uw.publicKey;
+          // Resolve the creator coin from the connected wallet. Today we only
+          // gift our own coin; if symbol-routing for foreign coins is needed,
+          // the parent passes `creatorPubkey` and we resolve mint from there.
+          const mintPda = onChain.coinMint(sender);
+          if (mintPda) {
+            const senderAta = getAssociatedTokenAddressSync(mintPda, sender, true);
+            const recipientAta = getAssociatedTokenAddressSync(mintPda, recipientPk, true);
+            const res = await onChain.module.giftCreatorCoin({
+              coinMint: mintPda,
+              senderTokenAccount: senderAta,
+              recipient: recipientPk,
+              recipientTokenAccount: recipientAta,
+              amount: BigInt(Math.round(amt * 1e9)),
+              memoUri: (message.trim() || '').slice(0, 256),
+            });
+            if (res.success) {
+              onChainSig = res.signature;
+            } else {
+              showToast('error', res.error || 'On-chain gift failed (mock gift preserved)');
+            }
+          }
+        } catch (err: any) {
+          showToast('error', err?.message || 'On-chain gift threw');
+        }
+      }
       mockChain.giftCreatorCoin(symbol, amt, recipient, message.trim() || undefined);
-      showToast('success', `🎁 Sent ${amt} ${symbol} to @${recipient.username}!`);
+      if (onChainSig) {
+        showToast('success', `🎁 Sent ${amt} ${symbol} on-chain`, `tx: ${onChainSig.slice(0, 8)}…`);
+      } else {
+        showToast('success', `🎁 Sent ${amt} ${symbol} to @${recipient.username}!`);
+      }
       reset();
       onOpenChange(false);
     } catch (err: any) {

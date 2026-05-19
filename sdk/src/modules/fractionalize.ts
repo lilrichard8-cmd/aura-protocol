@@ -228,6 +228,14 @@ export class FractionalizeModule {
 
   // ── Write helpers ────────────────────────────────────────────────────
 
+  /**
+   * fractionalizeNft — [stack-fix 2026-05-19] The on-chain program now
+   * splits the original monolithic `fractionalize_nft` instruction into
+   * three sub-instructions (init_fractional_state, init_fragment_mint,
+   * init_vaults_and_lock) to stay under the 4KB BPF stack cap. This SDK
+   * method batches all three into a single transaction so the public
+   * interface is unchanged from the caller's perspective.
+   */
   async fractionalizeNft(params: FractionalizeNftParams): Promise<TransactionResult & { fractionalNft?: PublicKey; fragmentMint?: PublicKey }> {
     const owner = this.requireWallet();
     if (BigInt(params.totalFragments) > FRACTIONALIZE_LIMITS.MAX_FRAGMENTS)
@@ -238,17 +246,43 @@ export class FractionalizeModule {
     const nftVault = this.pdas.nftVault(params.nftMint);
     const revVault = this.pdas.revenueVault(params.nftMint);
 
-    const data = Buffer.concat([
-      ixDiscriminator('fractionalize_nft'),
-      u64LE(BigInt(params.totalFragments)),
-      u64LE(BigInt(params.pricePerFragment)),
-    ]);
-    const ix = new TransactionInstruction({
+    // Step 1/3: init_fractional_state
+    const ix1 = new TransactionInstruction({
       programId: this.programId,
       keys: [
         { pubkey: fnft, isSigner: false, isWritable: true },
         { pubkey: params.nftMint, isSigner: false, isWritable: false },
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([
+        ixDiscriminator('init_fractional_state'),
+        u64LE(BigInt(params.totalFragments)),
+        u64LE(BigInt(params.pricePerFragment)),
+      ]),
+    });
+
+    // Step 2/3: init_fragment_mint
+    const ix2 = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: fnft, isSigner: false, isWritable: true },
         { pubkey: fragMint, isSigner: false, isWritable: true },
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      data: ixDiscriminator('init_fragment_mint'),
+    });
+
+    // Step 3/3: init_vaults_and_lock
+    const ix3 = new TransactionInstruction({
+      programId: this.programId,
+      keys: [
+        { pubkey: fnft, isSigner: false, isWritable: true },
+        { pubkey: params.nftMint, isSigner: false, isWritable: false },
         { pubkey: nftVault, isSigner: false, isWritable: true },
         { pubkey: revVault, isSigner: false, isWritable: true },
         { pubkey: params.ownerNftAccount, isSigner: false, isWritable: true },
@@ -257,9 +291,10 @@ export class FractionalizeModule {
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
       ],
-      data,
+      data: ixDiscriminator('init_vaults_and_lock'),
     });
-    const res = await this.sendTx([ix]);
+
+    const res = await this.sendTx([ix1, ix2, ix3]);
     return { ...res, fractionalNft: fnft, fragmentMint: fragMint };
   }
 
@@ -305,11 +340,16 @@ export class FractionalizeModule {
     const ix = new TransactionInstruction({
       programId: this.programId,
       keys: [
-        { pubkey: fnft, isSigner: false, isWritable: false },
+        // [audit/sell] fractional_nft is `mut` in the Accounts struct;
+        // marking it writable.
+        { pubkey: fnft, isSigner: false, isWritable: true },
         { pubkey: fragMint, isSigner: false, isWritable: true },
         { pubkey: revVault, isSigner: false, isWritable: true },
         { pubkey: holderPda, isSigner: false, isWritable: true },
         { pubkey: params.sellerFragmentAccount, isSigner: false, isWritable: true },
+        // [stack-fix 2026-05-19] Optional license_vote: pass program id
+        // sentinel to indicate None (Anchor 0.29 convention).
+        { pubkey: this.programId, isSigner: false, isWritable: false },
         { pubkey: seller, isSigner: true, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

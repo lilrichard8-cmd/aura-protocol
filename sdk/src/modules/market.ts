@@ -549,11 +549,18 @@ export class MarketModule {
     try {
       const sponsor = this.requireWallet();
       const tx = new Transaction().add(...ixs);
-      const { blockhash } = await this.connection.getLatestBlockhash();
+      // H-5 (2026-05-19 audit) — Use the blockhash+lastValidBlockHeight
+      // confirmTransaction signature so confirmation has a real expiry
+      // (~150 slots) instead of the deprecated 60s/string default, which
+      // could hang the UI indefinitely on slow RPCs.
+      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = sponsor;
       const sig = await this.wallet.sendTransaction(tx, this.connection);
-      await this.connection.confirmTransaction(sig);
+      await this.connection.confirmTransaction(
+        { signature: sig, blockhash, lastValidBlockHeight },
+        'confirmed',
+      );
       return { signature: sig, success: true };
     } catch (e) {
       return { signature: '', success: false, error: e instanceof Error ? e.message : String(e) };

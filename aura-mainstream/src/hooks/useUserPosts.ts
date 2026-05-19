@@ -33,6 +33,10 @@ interface RawUserPost {
   createdAt?: number | string;
   isPremium?: boolean;
   premiumPrice?: number;
+  /** 2026-05-19 — base58 Solana post PDA when the post was published
+   *  via Core publishContent. Lets PostDetail run live likes. */
+  onChainPostPda?: string;
+  onChainSignature?: string;
 }
 
 function readRaw(): RawUserPost[] {
@@ -90,6 +94,7 @@ export function rawToPost(item: RawUserPost, author: User, idx: number = 0): Pos
     isPremium: item.isPremium,
     premiumPrice: item.premiumPrice,
     tags: item.tags || [],
+    onChainPostPda: item.onChainPostPda,
     createdAt: created,
     // The publishedAt timestamp lets feeds sort by recency without
     // reparsing `createdAt`. Older feeds that don't read this key

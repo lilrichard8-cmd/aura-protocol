@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import FeedCard from '@/components/cards/FeedCard';
 import { posts, adPosts, categories } from '@/data/mock';
 import { useUserPosts } from '@/hooks/useUserPosts';
+import { useAggregatedUserPosts } from '@/hooks/useAggregatedUserPosts';
 import { useI18n } from '@/context/I18nContext';
 import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
@@ -69,11 +70,16 @@ export default function ExplorePage() {
   // User-published posts (localStorage) merged AHEAD of seed posts so
   // freshly-created content shows up at the top of Explore.
   const myPublishedPosts = useUserPosts(me as any);
+  // 2026-05-19 — cross-user on-chain post stubs from the per-device
+  // localStorage registry (Tier-2). Replaced by indexer pre-mainnet.
+  const { posts: aggregatedPosts } = useAggregatedUserPosts(me as any);
 
   const filteredPosts: Post[] = useMemo(() => {
-    // Merge user-published posts in front of seed posts. They sort
-    // newest-first inside `myPublishedPosts` already.
-    const merged: Post[] = [...myPublishedPosts, ...posts];
+    // Merge user-published posts + cross-user on-chain stubs in front
+    // of seed posts. They sort newest-first internally.
+    const myIds = new Set(myPublishedPosts.map(p => p.id));
+    const otherChainPosts = aggregatedPosts.filter(p => !myIds.has(p.id));
+    const merged: Post[] = [...myPublishedPosts, ...otherChainPosts, ...posts];
     const sorted = [...merged].sort((a, b) => {
       const sa = (a.isCurated ? 2 : 0) + (a.isBoosted ? 1 : 0);
       const sb = (b.isCurated ? 2 : 0) + (b.isBoosted ? 1 : 0);
@@ -98,7 +104,7 @@ export default function ExplorePage() {
 
       return matchesSearch && matchesCategory;
     });
-  }, [searchQuery, activeCategory, myPublishedPosts]);
+  }, [searchQuery, activeCategory, myPublishedPosts, aggregatedPosts]);
 
   // ── Follow toggle (real mockChain action) ────────────────────────────────
   const toggleFollow = (userId: string) => {
