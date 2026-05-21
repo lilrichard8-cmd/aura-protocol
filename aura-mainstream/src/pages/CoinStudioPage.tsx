@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/button';
 import RedemptionsContent from '@/components/profile/RedemptionsContent';
 import { useToast } from '@/context/ToastContext';
 import MintCeremony from '@/components/coin/MintCeremony';
+import FirstVisitTooltip from '@/components/Tooltip/FirstVisitTooltip';
 import BatchUnlockCeremony from '@/components/coin/BatchUnlockCeremony';
 import BatchPricingPlan from '@/components/coin/BatchPricingPlan';
 import UserAvatar from '@/components/UserAvatar';
@@ -90,6 +91,14 @@ export default function CoinStudioPage() {
   if (!mockChain.hasCreatorCoin || !mockChain.creatorCoinSymbol) {
     return (
       <>
+        <FirstVisitTooltip
+          id="creator-coin-launch"
+          target='[data-tour-id="creator-coin-mint"]'
+          title="100 粉丝即可发你自己的代币"
+          body="Creator Coin = 你专属的 10K 代币。早期粉丝可以 mint、交易、兑换你提供的 benefits。"
+          placement="bottom"
+          showAfterMs={700}
+        />
         <div className="min-h-screen flex items-center justify-center px-6 py-12">
           <div className="max-w-md text-center space-y-4">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-aura/10 text-aura mx-auto">
@@ -102,6 +111,7 @@ export default function CoinStudioPage() {
             </p>
             <Button
               onClick={() => setShowMintModal(true)}
+              data-tour-id="creator-coin-mint"
               className="bg-gradient-to-r from-aura to-purple-500 text-white"
             >
               <Sparkles className="w-4 h-4 mr-1" />

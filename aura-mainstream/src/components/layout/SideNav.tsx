@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useDevTools } from '@/context/DevToolsContext';
 import { 
   Home, 
   Search, 
@@ -12,7 +13,7 @@ import {
   Sun,
   Moon,
   Monitor,
-
+  Bug,
   Bell,
   Eye,
   ShoppingCart,
@@ -407,6 +408,7 @@ export default function SideNav() {
           <div className="pt-4">
             <button
               onClick={() => navigate('/studio')}
+              data-tour-id="create-button"
               className={cn(
                 "w-full flex items-center justify-center gap-2 p-3 rounded-xl bg-gradient-to-r from-aura to-ora text-white font-medium transition-all duration-300 hover:shadow-lg hover:scale-105",
                 collapsed ? "p-3" : "px-4 py-3"
@@ -419,7 +421,7 @@ export default function SideNav() {
           </div>
         </div>
 
-        {/* Theme & Language toggles */}
+        {/* Theme & Language toggles + test-user actions */}
         <div className="px-3 space-y-1">
           <button
             onClick={cycleTheme}
@@ -429,6 +431,8 @@ export default function SideNav() {
             <ThemeIcon className="w-5 h-5" />
             {!collapsed && <span className="text-sm font-medium">{themeLabel}</span>}
           </button>
+
+          <SideNavDevTools collapsed={collapsed} />
           {/* Language auto-detected from system settings */}
         </div>
 
@@ -457,5 +461,46 @@ export default function SideNav() {
         </div>
       </div>
     </nav>
+  );
+}
+
+/**
+ * Test-user-facing actions in the side nav:
+ *  - Feedback panel trigger (always shown)
+ *  - Sentry verify-error trigger (dev / preview only)
+ *
+ * Test users had trouble finding the old floating Feedback bubble, so it
+ * now lives in the white-area nav alongside the theme toggle.
+ */
+function SideNavDevTools({ collapsed }: { collapsed: boolean }) {
+  const { setFeedbackOpen, triggerSentryTest } = useDevTools();
+  const showSentryTest =
+    import.meta.env.DEV || import.meta.env.VITE_SHOW_DEV_BUTTONS === 'true';
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setFeedbackOpen(true)}
+        className="w-full flex items-center gap-3 p-3 rounded-xl text-primary hover:bg-primary/10 transition-all duration-300"
+        title={collapsed ? 'Send feedback' : undefined}
+        aria-label="Send feedback"
+      >
+        <MessageSquare className="w-5 h-5" />
+        {!collapsed && <span className="text-sm font-medium">Feedback</span>}
+      </button>
+      {showSentryTest && (
+        <button
+          type="button"
+          onClick={triggerSentryTest}
+          className="w-full flex items-center gap-3 p-3 rounded-xl text-amber-600 hover:bg-amber-500/10 transition-all duration-300"
+          title={collapsed ? 'Trigger Sentry test error' : undefined}
+          aria-label="Trigger Sentry test error"
+        >
+          <Bug className="w-5 h-5" />
+          {!collapsed && <span className="text-sm font-medium">Sentry test</span>}
+        </button>
+      )}
+    </>
   );
 }

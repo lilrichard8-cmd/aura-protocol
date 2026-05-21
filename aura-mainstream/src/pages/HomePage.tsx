@@ -8,6 +8,7 @@ import { useMockChain } from '@/context/MockChainContext';
 import { useAuth } from '@/context/AuthContext';
 import { useUserPosts } from '@/hooks/useUserPosts';
 import { useAggregatedUserPosts } from '@/hooks/useAggregatedUserPosts';
+import FirstVisitTooltip from '@/components/Tooltip/FirstVisitTooltip';
 
 export default function HomePage() {
   const { t } = useI18n();
@@ -97,6 +98,14 @@ export default function HomePage() {
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
+      <FirstVisitTooltip
+        id="feed-create"
+        target='[data-tour-id="create-button"], [data-tour-id="create-button-mobile"]'
+        placement="right"
+        title="点这里发布你的第一篇内容"
+        body="Photo / Video / Text / Audio / Live 都可以。打开 Studio 后你还能设置 access control、发 NFT。"
+        showAfterMs={900}
+      />
       {/* Pull-to-refresh */}
       <div
         className="flex flex-col items-center justify-center overflow-hidden transition-all duration-300 ease-out md:hidden"

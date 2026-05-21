@@ -25,76 +25,11 @@ import RedeemConfirmDialog from '@/components/coin/RedeemConfirmDialog';
 import GiftCoinDialog from '@/components/coin/GiftCoinDialog';
 import { users, iris, posts as allPosts } from '@/data/mock';
 
-function timeAgo(ts: number): string {
-  const sec = Math.max(1, Math.floor((Date.now() - ts) / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const d = Math.floor(hr / 24);
-  return `${d}d ago`;
-}
 
-interface PricePoint {
-  time: string;
-  price: number;
-  volume: number;
-}
 
-interface Holder {
-  id: string;
-  name: string;
-  avatar: string;
-  username: string;
-  amount: number;
-  percentage: number;
-}
-
-interface Transaction {
-  id: string;
-  type: 'buy' | 'sell';
-  user: {
-    name: string;
-    avatar: string;
-    username: string;
-  };
-  amount: number;
-  price: number;
-  total: number;
-  time: string;
-}
-
-interface CreatorContent {
-  id: string;
-  title: string;
-  thumbnail: string;
-  type: 'photo' | 'video';
-  likes: number;
-  createdAt: string;
-}
-
-interface CoinData {
-  id: string;
-  name: string;
-  symbol: string;
-  creator: {
-    name: string;
-    avatar: string;
-    username: string;
-    followers: number;
-    bio: string;
-  };
-  currentPrice: number;
-  change24h: number;
-  circulating: number;
-  totalSupply: number;
-  volume24h: number;
-  holders: Holder[];
-  transactions: Transaction[];
-  recentContent: CreatorContent[];
-  priceHistory: PricePoint[];
-}
+// 2026-05-20 P-1 split: types + helpers extracted.
+import { timeAgo } from './lib/timeAgo';
+import type { PricePoint, Holder, Transaction, CreatorContent, CoinData } from './types';
 
 export default function CoinDetailPage() {
   const { t } = useI18n();

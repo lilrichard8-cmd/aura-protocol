@@ -32,6 +32,7 @@ export default function BottomNav() {
               <div key={path} className="relative -top-6">
                 <button
                   onClick={() => navigate(path)}
+                  data-tour-id="create-button-mobile"
                   className="group flex items-center justify-center w-14 h-14 rounded-full bg-gradient-to-tr from-aura to-aura-light text-white shadow-lg shadow-aura/40 hover:scale-105 active:scale-95 transition-all duration-300 ring-4 ring-background"
                 >
                   <Icon className="w-8 h-8 group-hover:rotate-90 transition-transform duration-300" strokeWidth={2.5} />

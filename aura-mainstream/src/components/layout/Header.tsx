@@ -1,4 +1,4 @@
-import { Wallet } from 'lucide-react';
+import { Wallet, MessageSquare, Bug } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import NotificationBell from '@/components/common/NotificationBell';
@@ -6,6 +6,7 @@ import LoginButton from '@/components/auth/LoginButton';
 import { useI18n } from '@/context/I18nContext';
 import { useOraBalance } from '@/hooks/useOraBalance';
 import { useUnifiedWallet } from '@/hooks/useUnifiedWallet';
+import { useDevTools } from '@/context/DevToolsContext';
 
 /** Format ORA balance for the pill. <1000: 2dp; <1M: 3 sig figs; else compact. */
 function formatPill(balance: number | null, error: string | null): string {
@@ -27,6 +28,11 @@ export default function Header() {
   const [scrolled, setScrolled] = useState(false);
   const uw = useUnifiedWallet();
   const { balance, enabled, error } = useOraBalance();
+  const { setFeedbackOpen, triggerSentryTest } = useDevTools();
+  // Sentry test button is only useful while the project is in test/preview
+  // phase. Hidden in production builds so real users never see it.
+  const showSentryTest =
+    import.meta.env.DEV || import.meta.env.VITE_SHOW_DEV_BUTTONS === 'true';
 
   useEffect(() => {
     const handleScroll = () => {
@@ -57,7 +63,34 @@ export default function Header() {
 {t.header.title}
         </h1>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Feedback trigger — high visibility in the white nav bar.
+             Test users asked for this to live in the top nav, not as a
+             floating bubble that was easy to miss. */}
+          <button
+            type="button"
+            onClick={() => setFeedbackOpen(true)}
+            aria-label="Send feedback"
+            title="Send feedback"
+            className="flex items-center justify-center size-8 rounded-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 transition-all duration-200 hover:scale-105 active:scale-95"
+          >
+            <MessageSquare className="size-4" />
+          </button>
+
+          {/* Sentry verify-trigger — dev / preview only.
+             Throws a tagged Error so we can confirm the SDK is wired up. */}
+          {showSentryTest && (
+            <button
+              type="button"
+              onClick={triggerSentryTest}
+              aria-label="Trigger Sentry test error"
+              title="Throw a test error (Sentry verify)"
+              className="flex items-center justify-center size-8 rounded-full bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 border border-amber-500/30 transition-all duration-200 hover:scale-105 active:scale-95"
+            >
+              <Bug className="size-4" />
+            </button>
+          )}
+
           {/* ORA Balance Pill — real on-chain when wallet is connected. */}
           {showRealPill ? (
             <button

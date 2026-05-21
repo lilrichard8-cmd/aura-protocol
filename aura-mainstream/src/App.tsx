@@ -67,6 +67,15 @@ import SupabaseFollowSync from '@/components/SupabaseFollowSync';
 // 2026-05-11 R22: floating IrisChat removed; Iris now lives as a pinned
 // thread inside the Messages page (Notifications → DM).
 import InstallPWA from '@/components/common/InstallPWA';
+import HelpButton from '@/components/HelpButton';
+import FeedbackWidget from '@/components/FeedbackWidget';
+import { DevToolsProvider, useDevTools } from '@/context/DevToolsContext';
+
+/** Renders FeedbackWidget controlled by DevToolsContext (trigger lives in Header). */
+function FeedbackWidgetMount() {
+  const { feedbackOpen, setFeedbackOpen } = useDevTools();
+  return <FeedbackWidget open={feedbackOpen} onOpenChange={setFeedbackOpen} />;
+}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -114,6 +123,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       </div>
 
       <InstallPWA />
+      <HelpButton />
       {!hideNavOnMobile && (
         <div className="block lg:hidden">
           <BottomNav />
@@ -215,14 +225,19 @@ export default function App() {
             <SupabaseFollowSync />
             <AuthProvider>
               <SideNavProvider>
-                <BrowserRouter>
-                  {/* BuyOraProvider must be inside the Router so the dialog can
-                     access navigate() and useSearchParams, and inside Mock/Toast
-                     so it can read balances and surface success toasts. */}
-                  <BuyOraProvider>
-                    <AppRoutes />
-                  </BuyOraProvider>
-                </BrowserRouter>
+                <DevToolsProvider>
+                  <BrowserRouter>
+                    {/* BuyOraProvider must be inside the Router so the dialog can
+                       access navigate() and useSearchParams, and inside Mock/Toast
+                       so it can read balances and surface success toasts. */}
+                    <BuyOraProvider>
+                      <AppRoutes />
+                      {/* Feedback panel — trigger lives in the top nav (Header).
+                         Mounted here (outside Layout) so it survives route changes. */}
+                      <FeedbackWidgetMount />
+                    </BuyOraProvider>
+                  </BrowserRouter>
+                </DevToolsProvider>
               </SideNavProvider>
             </AuthProvider>
           </MockChainProvider>

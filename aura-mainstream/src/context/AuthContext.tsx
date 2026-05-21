@@ -452,6 +452,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ?? (mockChain.connected ? mockChain.publicKey : null)
   ), [unifiedWallet.publicKey, solWallet.publicKey, mockChain.connected, mockChain.publicKey]);
 
+  // 2026-05-20 — push the current user identity into Sentry so any captured
+  // exceptions are tagged with the wallet + username. No-op when Sentry was
+  // not initialized (see main.tsx — only loads when VITE_SENTRY_DSN is set).
+  useEffect(() => {
+    try {
+      const Sentry = (window as any).__auraSentry;
+      if (!Sentry || typeof Sentry.setUser !== 'function') return;
+      if (walletAddress || user?.username) {
+        Sentry.setUser({
+          id: walletAddress ?? user?.id ?? undefined,
+          username: user?.username ?? undefined,
+        });
+      } else {
+        Sentry.setUser(null);
+      }
+    } catch {
+      /* never crash UI on telemetry */
+    }
+  }, [walletAddress, user?.id, user?.username]);
+
   const value = useMemo<AuthContextType>(() => ({
     updateProfile,
     user,

@@ -27,6 +27,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { useMockChain } from '@/context/MockChainContext';
 import { useToast } from '@/context/ToastContext';
+import ClaimTestOraButton from '@/components/ClaimTestOraButton';
 
 type Step = 'source' | 'amount' | 'confirm' | 'processing' | 'complete';
 type Source = 'protocol' | 'market';
@@ -485,6 +486,8 @@ export default function BuyOraPage() {
 
       {/* Main content */}
       <div className="max-w-3xl mx-auto px-4 md:px-6 pb-12">
+        {/* Faucet — devnet-only. Auto-hides on localnet/mainnet. */}
+        <ClaimTestOraButton variant="card" className="mb-6" />
         <div className="rounded-2xl border border-border/40 bg-card p-6 md:p-8 shadow-sm">
           {step === 'source' && renderSource()}
           {step === 'amount' && renderAmount()}
